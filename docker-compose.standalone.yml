@@ -1,0 +1,28 @@
+# Backend only — use with existing PostgreSQL (no Redis, no frontend)
+# Set POSTGRES_HOST, POSTGRES_PORT, etc. in .env or environment
+#
+#   docker compose -f docker-compose.standalone.yml up -d
+
+services:
+  local-storage:
+    build:
+      context: ./local-storage
+      dockerfile: Dockerfile
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      PORT: 8080
+      POSTGRES_HOST: ${POSTGRES_HOST:?Set POSTGRES_HOST for external DB}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-local_storage}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      ENABLE_REDIS: "false"
+      STORAGE_PATH: ${STORAGE_PATH:-/storage}
+      MAX_FILE_SIZE: ${MAX_FILE_SIZE:-1073741824}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - storage_data:/storage
+
+volumes:
+  storage_data:

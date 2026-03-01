@@ -1,0 +1,94 @@
+[package]
+name = "local-storage"
+version = "1.0.0"
+edition = "2021"
+authors = ["Cubernetes Team"]
+description = "High-performance S3-like local storage service with Redis caching"
+
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["multipart", "macros"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tower = "0.5"
+tower-http = { version = "0.5", features = ["cors", "trace", "timeout"] }
+hyper = { version = "1.0", features = ["full"] }
+headers = "0.4"
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# URL encoding for filenames
+urlencoding = "2.1"
+
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "bigdecimal", "ipnetwork", "macros"] }
+
+# Redis
+redis = { version = "0.24", features = ["tokio-comp", "connection-manager", "aio"] }
+
+# File operations
+blake3 = "1.5"
+md5 = "0.7"
+mime_guess = "2.0"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+hex = "0.4"
+
+# Compression
+flate2 = "1.0"
+zstd = "0.13"
+
+# Encryption
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+
+# Configuration
+config = "0.14"
+dotenvy = "0.15"
+
+# Logging
+tracing = { version = "0.1", features = ["attributes"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+log = "0.4"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json", "stream"] }
+
+# File system
+walkdir = "2.4"
+
+# Memory mapping for large files
+memmap2 = "0.9"
+
+# IP network
+ipnetwork = "0.20"
+
+# Futures
+futures-util = "0.3"
+futures = "0.3"
+
+# Better allocator for performance
+mimalloc = { version = "0.1", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[dev-dependencies]
+tempfile = "3.8"
+tokio-test = "0.4"
+base64 = "0.21" 

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE encryption_keys SET is_active = false, updated_at = NOW() WHERE key_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3f6987161705de88937dd25a8213c8fc94e76a1d6b647f603dc1673bd5274e70"
+}

@@ -1,0 +1,30 @@
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+*.pem
+
+# Rust
+local-storage/target/
+**/*.rs.bk
+
+# Node
+local-storage-ui/node_modules/
+local-storage-ui/build/
+local-storage-ui/.env.local
+local-storage-ui/npm-debug.log*
+local-storage-ui/yarn-debug.log*
+local-storage-ui/yarn-error.log*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# SQLx (optional - keep .sqlx for offline builds)
+# local-storage/.sqlx/

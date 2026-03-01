@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE files\n            SET \n                file_size = $1,\n                original_size = $2,\n                hash_blake3 = $3,\n                is_compressed = $4,\n                is_encrypted = $5,\n                compression_algorithm = $6,\n                encryption_algorithm = $7,\n                compression_ratio = $8,\n                compression_level = $9,\n                cache_status = $10,\n                cache_hits = $11,\n                cache_priority = $12,\n                last_cache_update = $13,\n                last_accessed = $14,\n                access_count = $15\n            WHERE id = $16\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Varchar",
+        "Bool",
+        "Bool",
+        "Varchar",
+        "Varchar",
+        "Float4",
+        "Int4",
+        "Varchar",
+        "Int8",
+        "Int4",
+        "Timestamptz",
+        "Timestamptz",
+        "Int8",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "581f521f4a36400f26878057a1e977ebfc30632716f4be32de397dc432b56afc"
+}

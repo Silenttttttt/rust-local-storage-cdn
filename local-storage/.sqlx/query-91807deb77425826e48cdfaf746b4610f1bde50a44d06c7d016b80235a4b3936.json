@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO buckets (name, is_active) VALUES ($1, true) ON CONFLICT (name) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "91807deb77425826e48cdfaf746b4610f1bde50a44d06c7d016b80235a4b3936"
+}

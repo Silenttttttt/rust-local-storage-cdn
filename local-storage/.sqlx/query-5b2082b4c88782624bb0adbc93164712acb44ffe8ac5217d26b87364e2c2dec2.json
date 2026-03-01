@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) as file_count, COALESCE(SUM(file_size), 0) as total_size FROM files WHERE bucket = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "file_count",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "total_size",
+        "type_info": "Numeric"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "5b2082b4c88782624bb0adbc93164712acb44ffe8ac5217d26b87364e2c2dec2"
+}

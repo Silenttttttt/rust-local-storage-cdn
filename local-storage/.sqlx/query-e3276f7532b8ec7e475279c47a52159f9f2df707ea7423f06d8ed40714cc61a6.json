@@ -1,0 +1,178 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT *\n            FROM files\n            WHERE encryption_key_id = $1\n            ORDER BY upload_time DESC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "bucket",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "filename",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "file_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "file_size",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "original_size",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "content_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "hash_blake3",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "hash_md5",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "metadata",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 11,
+        "name": "is_compressed",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 12,
+        "name": "is_encrypted",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 13,
+        "name": "compression_algorithm",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 14,
+        "name": "encryption_algorithm",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 15,
+        "name": "compression_ratio",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 16,
+        "name": "compression_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 17,
+        "name": "encryption_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 18,
+        "name": "compression_level",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 19,
+        "name": "upload_time",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 20,
+        "name": "last_accessed",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 21,
+        "name": "access_count",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 22,
+        "name": "encryption_key_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 23,
+        "name": "cache_status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 24,
+        "name": "last_cache_update",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 25,
+        "name": "cache_hits",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 26,
+        "name": "cache_priority",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "e3276f7532b8ec7e475279c47a52159f9f2df707ea7423f06d8ed40714cc61a6"
+}

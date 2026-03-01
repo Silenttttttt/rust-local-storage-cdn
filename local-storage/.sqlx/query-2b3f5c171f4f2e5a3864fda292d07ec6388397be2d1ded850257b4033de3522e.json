@@ -1,0 +1,62 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, key_id, key_data, algorithm, created_at, updated_at, is_active, description\n            FROM encryption_keys\n            WHERE is_active = true\n            ORDER BY created_at DESC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "key_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "key_data",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 3,
+        "name": "algorithm",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "is_active",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "description",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "2b3f5c171f4f2e5a3864fda292d07ec6388397be2d1ded850257b4033de3522e"
+}

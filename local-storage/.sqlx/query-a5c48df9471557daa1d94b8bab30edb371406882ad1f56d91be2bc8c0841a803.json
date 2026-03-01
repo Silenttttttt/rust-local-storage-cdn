@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE files SET last_accessed = NOW(), access_count = access_count + 1 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a5c48df9471557daa1d94b8bab30edb371406882ad1f56d91be2bc8c0841a803"
+}

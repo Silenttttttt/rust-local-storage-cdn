@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE cache_config SET max_cache_size_gb = $1, cache_ttl_seconds = $2, preload_enabled = $3, min_access_count = $4, auto_cache_threshold = $5, updated_at = NOW() WHERE id = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Float8",
+        "Int4",
+        "Bool",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5714624dfceef85997582666ea2587347346dcfbe6a9451961369bfe434e25f0"
+}

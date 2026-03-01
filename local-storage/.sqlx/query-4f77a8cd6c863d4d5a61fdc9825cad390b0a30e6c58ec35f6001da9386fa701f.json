@@ -1,0 +1,44 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT \n                COUNT(*) as total_files,\n                COALESCE(SUM(file_size), 0) as total_size,\n                COUNT(*) FILTER (WHERE is_compressed) as compressed_files,\n                COUNT(*) FILTER (WHERE is_encrypted) as encrypted_files,\n                COALESCE(AVG(compression_ratio), 0.0) as avg_compression_ratio\n            FROM files\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total_files",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "total_size",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 2,
+        "name": "compressed_files",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "encrypted_files",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "avg_compression_ratio",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "4f77a8cd6c863d4d5a61fdc9825cad390b0a30e6c58ec35f6001da9386fa701f"
+}

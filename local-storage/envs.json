@@ -1,0 +1,127 @@
+{
+    "POSTGRES_HOST": {
+        "required": false,
+        "default": "192.168.1.218",
+        "description": "PostgreSQL host address"
+    },
+    "POSTGRES_PORT": {
+        "required": false,
+        "default": "30432",
+        "description": "PostgreSQL port number"
+    },
+    "POSTGRES_DB": {
+        "required": false,
+        "default": "local_storage_db",
+        "description": "PostgreSQL database name"
+    },
+    "POSTGRES_USER": {
+        "required": false,
+        "default": "postgres",
+        "description": "PostgreSQL username"
+    },
+    "POSTGRES_PASSWORD": {
+        "required": false,
+        "default": "postgres123",
+        "description": "PostgreSQL password"
+    },
+    "REDIS_HOST": {
+        "required": false,
+        "default": "192.168.1.218",
+        "description": "Redis host address"
+    },
+    "REDIS_PORT": {
+        "required": false,
+        "default": "30379",
+        "description": "Redis port number"
+    },
+    "REDIS_PASSWORD": {
+        "required": false,
+        "default": "",
+        "description": "Redis password (optional)"
+    },
+    "REDIS_DB": {
+        "required": false,
+        "default": "1",
+        "description": "Redis database number"
+    },
+    "REDIS_MAX_CONNECTIONS": {
+        "required": false,
+        "default": "10",
+        "description": "Maximum Redis connections"
+    },
+    "REDIS_TTL_SECONDS": {
+        "required": false,
+        "default": "3600",
+        "description": "Redis cache TTL in seconds"
+    },
+    "STORAGE_PATH": {
+        "required": false,
+        "default": "/storage",
+        "description": "Base path for file storage"
+    },
+    "MAX_FILE_SIZE": {
+        "required": false,
+        "default": "1073741824",
+        "description": "Maximum file size in bytes (1GB default)"
+    },
+    "LOG_LEVEL": {
+        "required": false,
+        "default": "INFO",
+        "description": "Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)"
+    },
+    "PORT": {
+        "required": false,
+        "default": "8080",
+        "description": "HTTP server port"
+    },
+    "DB_MAX_CONNECTIONS": {
+        "required": false,
+        "default": "10",
+        "description": "Maximum database connections"
+    },
+    "ENABLE_DEDUPLICATION": {
+        "required": false,
+        "default": "true",
+        "description": "Enable file deduplication using hashes"
+    },
+    "ENABLE_COMPRESSION": {
+        "required": false,
+        "default": "true",
+        "description": "Enable automatic file compression"
+    },
+    "COMPRESSION_ALGORITHM": {
+        "required": false,
+        "default": "zstd",
+        "description": "Compression algorithm (gzip, zstd)"
+    },
+    "COMPRESSION_LEVEL": {
+        "required": false,
+        "default": "3",
+        "description": "Compression level (1-9)"
+    },
+    "COMPRESSION_MIN_SIZE": {
+        "required": false,
+        "default": "1024",
+        "description": "Minimum file size for compression (bytes)"
+    },
+    "ENABLE_ENCRYPTION": {
+        "required": false,
+        "default": "false",
+        "description": "Enable automatic file encryption"
+    },
+    "CRYPTO_ALGORITHM": {
+        "required": false,
+        "default": "aes-gcm",
+        "description": "Encryption algorithm (aes-gcm, chacha20poly1305)"
+    },
+    "CRYPTO_KEY": {
+        "required": false,
+        "default": "",
+        "description": "Encryption key (32 bytes or 64 hex chars)"
+    },
+    "DEFAULT_BUCKET": {
+        "required": false,
+        "default": "default",
+        "description": "Default bucket name for files"
+    }
+} 

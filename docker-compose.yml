@@ -1,0 +1,73 @@
+# Local dev with Docker Postgres. For backend-only + external DB, use:
+#   docker compose -f docker-compose.standalone.yml up -d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    profiles:
+      - db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-local_storage}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    profiles:
+      - redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  local-storage:
+    build:
+      context: ./local-storage
+      dockerfile: Dockerfile
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      PORT: 8080
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-local_storage}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      ENABLE_REDIS: ${ENABLE_REDIS:-false}
+      STORAGE_PATH: /storage
+      MAX_FILE_SIZE: ${MAX_FILE_SIZE:-1073741824}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - storage_data:/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - db
+
+  local-storage-ui:
+    build:
+      context: ./local-storage-ui
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      API_URL: ${API_URL:-http://localhost:8080}
+    depends_on:
+      - local-storage
+    profiles:
+      - frontend
+
+volumes:
+  postgres_data:
+  storage_data:

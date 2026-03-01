@@ -1,0 +1,9 @@
+# Override to enable Redis caching. Use with:
+#   docker compose -f docker-compose.yml -f docker-compose.redis.yml --profile redis up -d
+services:
+  local-storage:
+    environment:
+      ENABLE_REDIS: "true"
+    depends_on:
+      redis:
+        condition: service_healthy

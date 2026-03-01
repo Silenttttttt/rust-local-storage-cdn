@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE files SET cache_status = 'not_cached', last_cache_update = NOW() WHERE cache_status = 'cached'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "88a7eb0c563966c550f99286bb2f196ef7d8c09c048d75e04814be550a7f598f"
+}
