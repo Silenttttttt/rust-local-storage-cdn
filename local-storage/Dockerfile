@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Multi-stage Rust build for maximum performance
 FROM rustlang/rust:nightly-slim AS builder
 
@@ -23,14 +24,18 @@ COPY .sqlx ./.sqlx
 RUN mkdir src && echo "fn main() {}" > src/main.rs
 
 # Build dependencies (this layer will be cached)
-RUN cargo build --release && rm -rf src
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release && rm -rf src
 
 # Copy source code and migrations
 COPY src ./src
 COPY migrations ./migrations
 
-# Build the actual application
-RUN cargo build --release
+# Build the actual application (binary copied out; cache mount is not persisted in image)
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release && cp /app/target/release/local-storage /tmp/local-storage
 
 # Runtime stage with Debian slim (compatible with glibc)
 FROM debian:bookworm-slim
@@ -51,7 +56,7 @@ RUN mkdir -p /storage && \
     chown appuser:appgroup /storage
 
 # Copy binary and migrations from builder stage
-COPY --from=builder /app/target/release/local-storage /usr/local/bin/local-storage
+COPY --from=builder /tmp/local-storage /usr/local/bin/local-storage
 COPY --from=builder /app/migrations /app/migrations
 RUN chmod +x /usr/local/bin/local-storage && chown -R appuser:appgroup /app
 
