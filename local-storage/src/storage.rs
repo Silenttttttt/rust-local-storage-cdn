@@ -135,24 +135,26 @@ impl StorageManager {
             0i32   // cache_priority
         )
         .fetch_one(&mut *tx)
-        .await.map_err(|e| {
-            error!("❌ Database insert failed, cleaning up file: {}", e);
-            // Clean up the file if database insert fails
-            if let Err(cleanup_err) = std::fs::remove_file(&file_path) {
-                warn!("Failed to cleanup file after DB error: {}", cleanup_err);
-            }
-            
-            // Check if this is a duplicate key constraint violation
+        .await
+        .map_err(|e| {
+            // If this is a duplicate key, another upload already won the DB insert.
+            // In that case, deleting the on-disk file here can create DB/disk mismatch
+            // (the existing DB row still points to `file_path`, but we removed it).
             if let sqlx::Error::Database(db_err) = &e {
                 if db_err.code() == Some(Cow::Borrowed("23505")) {
-                    // PostgreSQL unique constraint violation
                     return StorageError::AlreadyExists {
                         bucket: bucket.to_string(),
                         key: key.to_string(),
                     };
                 }
             }
-            
+
+            error!("❌ Database insert failed, cleaning up file: {}", e);
+            // Clean up the file if database insert fails (only for non-duplicate errors)
+            if let Err(cleanup_err) = std::fs::remove_file(&file_path) {
+                warn!("Failed to cleanup file after DB error: {}", cleanup_err);
+            }
+
             StorageError::Database(e.to_string())
         })?;
 
@@ -206,7 +208,23 @@ impl StorageManager {
 
         // Read file content
         let file_path = self.get_file_path(bucket, key);
-        let content = tokio::fs::read(&file_path).await?;
+        let content = match tokio::fs::read(&file_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                // Safety net: if DB has a row but disk file is missing, delete the broken row
+                // and return NotFound so callers can self-heal.
+                let msg = e.to_string();
+                if msg.contains("No such file or directory") || msg.contains("os error 2") {
+                    // Best-effort delete; if it fails we'll still return NotFound.
+                    let _ = self.delete_file(bucket, key).await;
+                    return Err(StorageError::NotFound {
+                        bucket: bucket.to_string(),
+                        key: key.to_string(),
+                    });
+                }
+                return Err(StorageError::Io(msg));
+            }
+        };
 
         Ok((content, Some(file.content_type)))
     }
