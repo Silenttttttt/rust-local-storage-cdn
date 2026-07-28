@@ -1,26 +1,17 @@
 import axios from 'axios';
-import { BucketStats, FileListParams, FileSearchParams, FileUploadResponse, StorageStats, StoredFile, HealthResponse } from '../types/api';
+import {
+  BucketStats, FileListParams, FileSearchParams, FileUploadResponse, StorageStats, StoredFile,
+  UploadOptions, EncryptionKeyInfo, CreateKeyRequest,
+} from '../types/api';
 
-// Get API URL from runtime configuration or fallback to environment variable
 const getApiUrl = (): string => {
-  // Try runtime config first (for production)
   if (typeof window !== 'undefined' && window.APP_CONFIG?.API_URL) {
-    console.log('📡 Using runtime API URL:', window.APP_CONFIG.API_URL);
     return window.APP_CONFIG.API_URL;
   }
-  // Fallback to environment variable (for development)
-  const envUrl = process.env.REACT_APP_API_URL || 'http://localhost:8080';
-  console.log('📡 Using environment API URL:', envUrl);
-  return envUrl;
+  return process.env.REACT_APP_API_URL || 'http://localhost:8080';
 };
 
 const API_URL = getApiUrl();
-
-// Debug logging
-console.log('🔧 API Client Configuration:');
-console.log('  API_URL:', API_URL);
-console.log('  Environment:', process.env.NODE_ENV);
-console.log('  Runtime Config:', typeof window !== 'undefined' ? window.APP_CONFIG : 'Not available');
 
 const api = axios.create({
   baseURL: API_URL,
@@ -29,60 +20,35 @@ const api = axios.create({
   },
 });
 
-// Add request interceptor for debugging
-api.interceptors.request.use(
-  (config) => {
-    console.log('🚀 API Request:', {
-      method: config.method?.toUpperCase(),
-      url: config.url,
-      baseURL: config.baseURL,
-      fullURL: `${config.baseURL}${config.url}`,
-    });
-    return config;
-  },
-  (error) => {
-    console.error('❌ API Request Error:', error);
-    return Promise.reject(error);
-  }
-);
-
-// Add response interceptor for debugging
-api.interceptors.response.use(
-  (response) => {
-    console.log('✅ API Response:', {
-      status: response.status,
-      url: response.config.url,
-      data: response.data,
-    });
-    return response;
-  },
-  (error) => {
-    console.error('❌ API Response Error:', {
-      status: error.response?.status,
-      statusText: error.response?.statusText,
-      url: error.config?.url,
-      message: error.message,
-      response: error.response?.data,
-    });
-    return Promise.reject(error);
-  }
-);
-
-export const uploadFile = async (bucket: string, file: File, path?: string): Promise<FileUploadResponse> => {
-  // Use the new raw file data format instead of multipart form data
+/**
+ * Uploads a file. `key` is the full object key including any folder prefix
+ * (e.g. "photos/2024/img.jpg") - it's carried entirely in the Content-Disposition filename,
+ * since that's the only place the backend reads it from. A previous version of this client also
+ * sent a `?path=` query parameter with the same value, which the backend has never read; files
+ * uploaded while "inside" a folder silently landed at the bucket root instead.
+ */
+export const uploadFile = async (
+  bucket: string,
+  file: File,
+  key: string,
+  options?: UploadOptions,
+): Promise<FileUploadResponse> => {
   const headers = {
-    'Content-Type': 'application/octet-stream',
-    'Content-Disposition': `attachment; filename="${encodeURIComponent(file.name)}"`,
+    'Content-Type': file.type || 'application/octet-stream',
+    'Content-Disposition': `attachment; filename="${encodeURIComponent(key)}"`,
   };
-  
-  // If path is specified, add it to the URL
-  const url = path 
-    ? `/buckets/${bucket}/files?path=${encodeURIComponent(path)}`
-    : `/buckets/${bucket}/files`;
-    
-  const response = await api.post<FileUploadResponse>(url, file, {
-    headers: headers,
-    timeout: 300000, // 5 minutes timeout for large files
+
+  const params: Record<string, string> = {};
+  if (options?.compress !== undefined) params.compress = String(options.compress);
+  if (options?.encrypt !== undefined) params.encrypt = String(options.encrypt);
+  if (options?.compression_algorithm) params.compression_algorithm = options.compression_algorithm;
+  if (options?.compression_level !== undefined) params.compression_level = String(options.compression_level);
+  if (options?.encryption_key_id) params.encryption_key_id = options.encryption_key_id;
+
+  const response = await api.post<FileUploadResponse>(`/buckets/${bucket}/files`, file, {
+    headers,
+    params,
+    timeout: 300000, // 5 minutes for large files
   });
   return response.data;
 };
@@ -104,18 +70,18 @@ export const searchFiles = async (params: FileSearchParams): Promise<StoredFile[
 };
 
 export const downloadFile = async (bucket: string, key: string): Promise<Blob> => {
-  const response = await api.get<Blob>(`/buckets/${bucket}/files/${key}`, {
+  const response = await api.get<Blob>(`/buckets/${bucket}/files/${encodeURIComponent(key)}`, {
     responseType: 'blob',
   });
   return response.data;
 };
 
 export const deleteFile = async (bucket: string, key: string): Promise<void> => {
-  await api.delete(`/buckets/${bucket}/files/${key}`);
+  await api.delete(`/buckets/${bucket}/files/${encodeURIComponent(key)}`);
 };
 
 export const getFileInfo = async (bucket: string, key: string): Promise<StoredFile> => {
-  const response = await api.get<StoredFile>(`/buckets/${bucket}/files/${key}/info`);
+  const response = await api.get<StoredFile>(`/buckets/${bucket}/files/${encodeURIComponent(key)}/info`);
   return response.data;
 };
 
@@ -134,11 +100,40 @@ export const listBuckets = async (): Promise<string[]> => {
   return response.data;
 };
 
+export const createBucket = async (bucket: string): Promise<void> => {
+  await api.post(`/buckets/${bucket}`);
+};
+
 export const deleteBucket = async (bucket: string): Promise<void> => {
   await api.delete(`/buckets/${bucket}`);
 };
 
-export const getHealth = async (): Promise<HealthResponse> => {
-  const response = await api.get<HealthResponse>('/health');
+/**
+ * The backend returns plain text ("OK"/"UNHEALTHY"), not JSON - the real signal is the HTTP
+ * status code (200 vs 503). A previous version of this client typed the response as JSON
+ * ({status: "healthy"}) and checked `.status === 'healthy'`, which is always undefined against a
+ * plain-text body - the health indicator showed "Offline" unconditionally regardless of actual
+ * backend health.
+ */
+export const getHealth = async (): Promise<boolean> => {
+  try {
+    const response = await api.get('/health', { validateStatus: () => true });
+    return response.status === 200;
+  } catch {
+    return false;
+  }
+};
+
+export const listEncryptionKeys = async (): Promise<EncryptionKeyInfo[]> => {
+  const response = await api.get<EncryptionKeyInfo[]>('/keys');
   return response.data;
-}; 
+};
+
+export const createEncryptionKey = async (req: CreateKeyRequest): Promise<EncryptionKeyInfo> => {
+  const response = await api.post<EncryptionKeyInfo>('/keys', req);
+  return response.data;
+};
+
+export const deactivateEncryptionKey = async (keyId: string): Promise<void> => {
+  await api.delete(`/keys/${encodeURIComponent(keyId)}`);
+};

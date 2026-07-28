@@ -18,7 +18,7 @@ export default function Search() {
   const [error, setError] = useState<string | null>(null);
 
   // Get list of buckets for filtering
-  const { data: buckets = [] } = useQuery({
+  const { data: buckets = [] } = useQuery<string[]>({
     queryKey: ['buckets'],
     queryFn: listBuckets,
   });
@@ -36,8 +36,8 @@ export default function Search() {
         limit: 100,
       });
       setSearchResults(results);
-    } catch (err: any) {
-      setError(err.message || 'Search failed');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Search failed');
       setSearchResults([]);
     } finally {
       setSearching(false);
@@ -133,7 +133,7 @@ export default function Search() {
                   startAdornment={<FilterList sx={{ mr: 1 }} />}
                 >
                   <MenuItem value="">All Buckets</MenuItem>
-                  {buckets.map((bucket) => (
+                  {buckets.map((bucket: string) => (
                     <MenuItem key={bucket} value={bucket}>
                       {bucket}
                     </MenuItem>
@@ -188,6 +188,8 @@ export default function Search() {
                       {getFileIcon(file.content_type)}
                     </Avatar>
                     <ListItemText
+                      primaryTypographyProps={{ component: 'div' }}
+                      secondaryTypographyProps={{ component: 'div' }}
                       primary={
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
                           <Typography variant="subtitle1">
@@ -203,11 +205,11 @@ export default function Search() {
                           <Typography variant="body2" color="textSecondary">
                             {formatBytes(file.file_size)} • {highlightText(file.content_type, query)}
                           </Typography>
-                                                     <Typography variant="caption" color="textSecondary">
-                             Key: {highlightText(file.key, query || '')} • 
-                             Uploaded: {new Date(file.upload_time).toLocaleDateString()} • 
-                             Access Count: {file.access_count}
-                           </Typography>
+                          <Typography variant="caption" color="textSecondary" sx={{ display: 'block' }}>
+                            Key: {highlightText(file.key, query || '')} •
+                            Uploaded: {new Date(file.upload_time).toLocaleDateString()} •
+                            Access Count: {file.access_count}
+                          </Typography>
                           {file.last_accessed && (
                             <Typography variant="caption" color="textSecondary" sx={{ display: 'block' }}>
                               Last accessed: {new Date(file.last_accessed).toLocaleDateString()}

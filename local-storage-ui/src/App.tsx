@@ -8,6 +8,7 @@ import Dashboard from './pages/Dashboard';
 import BucketView from './pages/BucketView';
 import Search from './pages/Search';
 import Buckets from './pages/Buckets';
+import Keys from './pages/Keys';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -225,6 +226,7 @@ function App() {
               <Route path="/buckets" element={<Buckets />} />
               <Route path="/buckets/:bucket" element={<BucketView />} />
               <Route path="/search" element={<Search />} />
+              <Route path="/keys" element={<Keys />} />
             </Routes>
           </Layout>
         </Router>

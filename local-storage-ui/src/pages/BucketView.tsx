@@ -2,57 +2,51 @@ import React, { useState, useCallback, useMemo } from 'react';
 import {
   Box, Grid, Card, CardContent, Typography, Button, IconButton, Dialog, DialogTitle, DialogContent, DialogActions,
   List, ListItem, ListItemText, ListItemSecondaryAction, Chip, TextField, Alert, LinearProgress,
-  Menu, MenuItem, Divider, ListItemIcon, Breadcrumbs, Link, Paper, Tooltip,
-  Fab
+  Menu, MenuItem, Divider, ListItemIcon, Breadcrumbs, Link, Paper, Tooltip, Fab,
+  FormControlLabel, Switch, Collapse, Select, FormControl, InputLabel, Snackbar,
 } from '@mui/material';
 import {
   Download, Delete, Search, Folder, InsertDriveFile, CloudUpload, MoreVert,
-  Info, Home, Refresh, NavigateNext, FolderOpen, 
-  AudioFile, Image, VideoFile, Description, Archive, Code, 
-  KeyboardArrowUp, KeyboardArrowDown, Sort, DeleteForever
+  Info, Home, Refresh, NavigateNext, FolderOpen,
+  AudioFile, Image, VideoFile, Description, Archive, Code,
+  KeyboardArrowUp, KeyboardArrowDown, Sort, DeleteForever, Tune, ExpandMore, ExpandLess,
 } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useParams } from 'react-router-dom';
 import { useDropzone } from 'react-dropzone';
-import { listFiles, uploadFile, downloadFile, deleteFile, getBucketStats, getFileInfo } from '../api/client';
+import { listFiles, uploadFile, downloadFile, deleteFile, getBucketStats, getFileInfo, listEncryptionKeys } from '../api/client';
 import { formatBytes } from '../utils/format';
-import { StoredFile } from '../types/api';
-
-interface FileItem {
-  type: 'file' | 'folder';
-  name: string;
-  displayName: string; // For collapsed paths like "folder1/folder2/folder3"
-  path: string;
-  file?: StoredFile;
-  size?: number;
-  fileCount?: number; // Total files in this folder (recursive)
-  children?: FileItem[];
-}
+import { buildFileTree, sortItems, breadcrumbs, FolderItem, FileEntry, SortBy, SortOrder } from '../utils/fileTree';
+import { StoredFile, UploadOptions, EncryptionKeyInfo } from '../types/api';
 
 export default function BucketView() {
   const { bucket } = useParams<{ bucket: string }>();
   const queryClient = useQueryClient();
+
   const [searchTerm, setSearchTerm] = useState('');
   const [currentPath, setCurrentPath] = useState('');
+  const [sortBy, setSortBy] = useState<SortBy>('name');
+  const [sortOrder, setSortOrder] = useState<SortOrder>('asc');
+  const [showFoldersFirst, setShowFoldersFirst] = useState(true);
+
   const [selectedFile, setSelectedFile] = useState<StoredFile | null>(null);
   const [fileInfoOpen, setFileInfoOpen] = useState(false);
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [fileToDelete, setFileToDelete] = useState<StoredFile | null>(null);
-  const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
-  const [menuFile, setMenuFile] = useState<StoredFile | null>(null);
-  const [sortBy, setSortBy] = useState<'name' | 'size' | 'date'>('name');
-  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
-  const [showFoldersFirst, setShowFoldersFirst] = useState(true);
-  const [folderToDelete, setFolderToDelete] = useState<FileItem | null>(null);
-  const [deleteFolderDialogOpen, setDeleteFolderDialogOpen] = useState(false);
-  const [folderMenuAnchorEl, setFolderMenuAnchorEl] = useState<null | HTMLElement>(null);
-  const [menuFolder, setMenuFolder] = useState<FileItem | null>(null);
+  const [folderToDelete, setFolderToDelete] = useState<FolderItem | null>(null);
   const [isDeletingFolder, setIsDeletingFolder] = useState(false);
 
-  // Queries
-  const { data: files = [], isLoading: filesLoading, error: filesError, refetch } = useQuery({
-    queryKey: ['files', bucket, currentPath],
-    queryFn: () => listFiles({ bucket: bucket!, prefix: currentPath }),
+  const [fileMenuAnchor, setFileMenuAnchor] = useState<null | HTMLElement>(null);
+  const [menuFile, setMenuFile] = useState<StoredFile | null>(null);
+  const [folderMenuAnchor, setFolderMenuAnchor] = useState<null | HTMLElement>(null);
+  const [menuFolder, setMenuFolder] = useState<FolderItem | null>(null);
+
+  const [uploadOptionsOpen, setUploadOptionsOpen] = useState(false);
+  const [uploadOptions, setUploadOptions] = useState<UploadOptions>({});
+  const [snackbar, setSnackbar] = useState<string | null>(null);
+
+  const { data: files = [], isLoading: filesLoading, error: filesError, refetch } = useQuery<StoredFile[]>({
+    queryKey: ['files', bucket],
+    queryFn: () => listFiles({ bucket: bucket!, limit: 1000 }),
     enabled: !!bucket,
   });
 
@@ -62,308 +56,104 @@ export default function BucketView() {
     enabled: !!bucket,
   });
 
-  // Mutations
+  const { data: encryptionKeys = [] } = useQuery<EncryptionKeyInfo[]>({
+    queryKey: ['encryption-keys'],
+    queryFn: listEncryptionKeys,
+    enabled: !!uploadOptions.encrypt,
+  });
+
+  const invalidateFiles = () => {
+    queryClient.invalidateQueries({ queryKey: ['files', bucket] });
+    queryClient.invalidateQueries({ queryKey: ['bucket-stats', bucket] });
+  };
+
   const uploadMutation = useMutation({
     mutationFn: ({ file }: { file: File }) => {
-      const uploadPath = currentPath ? `${currentPath}/${file.name}` : file.name;
-      return uploadFile(bucket!, file, uploadPath);
+      const key = currentPath ? `${currentPath}/${file.name}` : file.name;
+      return uploadFile(bucket!, file, key, uploadOptions);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['files', bucket, currentPath] });
-      queryClient.invalidateQueries({ queryKey: ['bucket-stats', bucket] });
-    },
+    onSuccess: invalidateFiles,
+    onError: () => setSnackbar('Upload failed'),
   });
 
   const deleteMutation = useMutation({
     mutationFn: ({ key }: { key: string }) => deleteFile(bucket!, key),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['files', bucket, currentPath] });
-      queryClient.invalidateQueries({ queryKey: ['bucket-stats', bucket] });
-      setDeleteDialogOpen(false);
+      invalidateFiles();
       setFileToDelete(null);
     },
+    onError: () => setSnackbar('Delete failed'),
   });
 
-  // File drop zone
   const onDrop = useCallback((acceptedFiles: File[]) => {
-    acceptedFiles.forEach(file => {
-      uploadMutation.mutate({ file });
-    });
-  }, [uploadMutation]);
+    acceptedFiles.forEach((file) => uploadMutation.mutate({ file }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uploadMutation, currentPath, uploadOptions]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({ onDrop });
 
-  // Helper function to calculate folder stats recursively
-  const calculateFolderStats = (folderPath: string, allFiles: StoredFile[]) => {
-    let totalSize = 0;
-    let fileCount = 0;
-    
-    allFiles.forEach(file => {
-      if (file.key.startsWith(folderPath + '/')) {
-        totalSize += file.file_size;
-        fileCount++;
-      }
-    });
-    
-    return { totalSize, fileCount };
-  };
+  const { folders, files: fileEntries } = useMemo(() => buildFileTree(files, currentPath), [files, currentPath]);
 
-  // Helper function to collapse single-child folders
-  const collapseFolders = (folderPath: string, folderName: string, allFiles: StoredFile[]): { displayName: string, finalPath: string } => {
-    let currentPath = folderPath;
-    let displayParts = [folderName];
-    
-    while (true) {
-      // Get immediate children of current folder
-      const prefix = currentPath + '/';
-      const children = allFiles.filter(f => {
-        const relativePath = f.key.substring(prefix.length);
-        return f.key.startsWith(prefix) && relativePath.length > 0;
-      });
-      
-      if (children.length === 0) break;
-      
-      // Get unique first-level subfolders
-      const subfolders = new Set<string>();
-      const directFiles = children.filter(f => {
-        const relativePath = f.key.substring(prefix.length);
-        const parts = relativePath.split('/');
-        if (parts.length > 1) {
-          subfolders.add(parts[0]);
-          return false;
-        }
-        return true;
-      });
-      
-      // Only collapse if there's exactly 1 subfolder and no files at this level
-      if (subfolders.size === 1 && directFiles.length === 0) {
-        const subfolderName = Array.from(subfolders)[0];
-        displayParts.push(subfolderName);
-        currentPath = `${currentPath}/${subfolderName}`;
-      } else {
-        break;
-      }
-    }
-    
-    return {
-      displayName: displayParts.join('/'),
-      finalPath: currentPath
-    };
-  };
+  const filteredFolders = useMemo(
+    () => folders.filter((f: FolderItem) => f.name.toLowerCase().includes(searchTerm.toLowerCase())),
+    [folders, searchTerm],
+  );
+  const filteredFiles = useMemo(
+    () => fileEntries.filter((f: FileEntry) =>
+      f.name.toLowerCase().includes(searchTerm.toLowerCase())
+      || f.file.content_type.toLowerCase().includes(searchTerm.toLowerCase())),
+    [fileEntries, searchTerm],
+  );
 
-  // Organize files into folders and files
-  const organizedItems = useMemo(() => {
-    const folders = new Map<string, FileItem>();
-    const fileItems: FileItem[] = [];
+  const sortedFolders = useMemo(() => sortItems(filteredFolders, sortBy, sortOrder), [filteredFolders, sortBy, sortOrder]);
+  const sortedFiles = useMemo(() => sortItems(filteredFiles, sortBy, sortOrder), [filteredFiles, sortBy, sortOrder]);
 
-    files.forEach(file => {
-      const relativePath = currentPath ? file.key.replace(currentPath + '/', '') : file.key;
-      const pathParts = relativePath.split('/');
-      
-      if (pathParts.length > 1) {
-        // This is a file in a subfolder
-        const folderName = pathParts[0];
-        const folderPath = currentPath ? `${currentPath}/${folderName}` : folderName;
-        
-        if (!folders.has(folderPath)) {
-          const { displayName, finalPath } = collapseFolders(folderPath, folderName, files);
-          const stats = calculateFolderStats(folderPath, files);
-          
-          folders.set(folderPath, {
-            type: 'folder',
-            name: folderName,
-            displayName: displayName,
-            path: finalPath, // Navigate to the deepest collapsed folder
-            size: stats.totalSize,
-            fileCount: stats.fileCount,
-            children: []
-          });
-        }
-      } else {
-        // This is a file in the current directory
-        const displayName = file.filename.includes('/') ? file.filename.split('/').pop()! : file.filename;
-        fileItems.push({
-          type: 'file',
-          name: displayName,
-          displayName: displayName,
-          path: file.key,
-          file: file,
-          size: file.file_size
-        });
-      }
-    });
+  const crumbs = useMemo(() => breadcrumbs(currentPath), [currentPath]);
 
-    const folderItems = Array.from(folders.values());
-    
-    // Sort items
-    const sortItems = (items: FileItem[]) => {
-      return items.sort((a, b) => {
-        if (showFoldersFirst && a.type !== b.type) {
-          return a.type === 'folder' ? -1 : 1;
-        }
-        
-        let comparison = 0;
-        switch (sortBy) {
-          case 'name':
-            comparison = a.displayName.localeCompare(b.displayName);
-            break;
-          case 'size':
-            comparison = (a.size || 0) - (b.size || 0);
-            break;
-          case 'date':
-            comparison = new Date(a.file?.upload_time || 0).getTime() - new Date(b.file?.upload_time || 0).getTime();
-            break;
-        }
-        
-        return sortOrder === 'asc' ? comparison : -comparison;
-      });
-    };
-
-    return {
-      folders: sortItems(folderItems),
-      files: sortItems(fileItems)
-    };
-  }, [files, currentPath, sortBy, sortOrder, showFoldersFirst]);
-
-  // Filter items based on search
-  const filteredItems = useMemo(() => {
-    if (!searchTerm) return organizedItems;
-    
-    const filterItems = (items: FileItem[]): FileItem[] => {
-      return items.filter(item => 
-        item.displayName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        item.file?.content_type.toLowerCase().includes(searchTerm.toLowerCase())
-      );
-    };
-
-    return {
-      folders: filterItems(organizedItems.folders),
-      files: filterItems(organizedItems.files)
-    };
-  }, [organizedItems, searchTerm]);
-
-  // Breadcrumb navigation
-  const breadcrumbItems = useMemo(() => {
-    const parts = currentPath.split('/').filter(Boolean);
-    return [
-      { name: 'Home', path: '' },
-      ...parts.map((part, index) => ({
-        name: part,
-        path: parts.slice(0, index + 1).join('/')
-      }))
-    ];
-  }, [currentPath]);
-
-  // Handlers
   const handleDownload = async (file: StoredFile) => {
     try {
       const blob = await downloadFile(file.bucket, file.key);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      // Use the filename, but if it contains a path, extract just the filename
-      const downloadName = file.filename.includes('/') ? file.filename.split('/').pop()! : file.filename;
-      a.download = downloadName;
+      a.download = file.filename;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-    } catch (error) {
-      console.error('Download failed:', error);
+    } catch {
+      setSnackbar('Download failed');
     }
-  };
-
-  const handleDelete = (file: StoredFile) => {
-    setFileToDelete(file);
-    setDeleteDialogOpen(true);
-    setAnchorEl(null);
   };
 
   const handleFileInfo = async (file: StoredFile) => {
     try {
-      const fileInfo = await getFileInfo(file.bucket, file.key);
-      setSelectedFile(fileInfo);
+      setSelectedFile(await getFileInfo(file.bucket, file.key));
       setFileInfoOpen(true);
-    } catch (error) {
-      console.error('Failed to get file info:', error);
+    } catch {
+      setSnackbar('Failed to load file info');
     }
-  };
-
-  const handleMenuClick = (event: React.MouseEvent<HTMLElement>, file: StoredFile) => {
-    setAnchorEl(event.currentTarget);
-    setMenuFile(file);
-  };
-
-  const handleMenuClose = () => {
-    setAnchorEl(null);
-    setMenuFile(null);
-  };
-
-  const confirmDelete = () => {
-    if (fileToDelete) {
-      deleteMutation.mutate({ key: fileToDelete.key });
-    }
-  };
-
-  const handleFolderMenuClick = (event: React.MouseEvent<HTMLElement>, folder: FileItem) => {
-    setFolderMenuAnchorEl(event.currentTarget);
-    setMenuFolder(folder);
-  };
-
-  const handleFolderMenuClose = () => {
-    setFolderMenuAnchorEl(null);
-    setMenuFolder(null);
-  };
-
-  const handleDeleteFolder = (folder: FileItem) => {
-    setFolderToDelete(folder);
-    setDeleteFolderDialogOpen(true);
-    setFolderMenuAnchorEl(null);
   };
 
   const confirmDeleteFolder = async () => {
-    if (!folderToDelete) return;
-    
+    if (!folderToDelete || !bucket) return;
     setIsDeletingFolder(true);
-    
     try {
-      // Get all files in this folder
-      const folderPrefix = folderToDelete.name; // Use the base folder name
-      const basePath = currentPath ? `${currentPath}/${folderPrefix}` : folderPrefix;
-      
-      // Delete all files in the folder
-      const filesToDelete = files.filter(f => f.key.startsWith(basePath + '/'));
-      
-      console.log(`Deleting ${filesToDelete.length} files from folder: ${basePath}`);
-      
-      // Delete files in parallel batches for better performance
+      const toDelete = files.filter((f: StoredFile) => f.key.startsWith(folderToDelete.path + '/'));
       const batchSize = 5;
-      for (let i = 0; i < filesToDelete.length; i += batchSize) {
-        const batch = filesToDelete.slice(i, i + batchSize);
-        await Promise.all(batch.map(file => deleteFile(bucket!, file.key)));
+      for (let i = 0; i < toDelete.length; i += batchSize) {
+        await Promise.all(toDelete.slice(i, i + batchSize).map((f: StoredFile) => deleteFile(bucket, f.key)));
       }
-      
-      // Refresh the file list
-      queryClient.invalidateQueries({ queryKey: ['files', bucket, currentPath] });
-      queryClient.invalidateQueries({ queryKey: ['bucket-stats', bucket] });
-      
-      setDeleteFolderDialogOpen(false);
+      invalidateFiles();
       setFolderToDelete(null);
-    } catch (error) {
-      console.error('Failed to delete folder:', error);
-      alert('Failed to delete folder. Please try again.');
+    } catch {
+      setSnackbar('Failed to delete folder');
     } finally {
       setIsDeletingFolder(false);
     }
   };
 
-  const navigateToFolder = (path: string) => {
-    setCurrentPath(path);
-  };
-
-  const getFileIcon = (contentType: string, isFolder: boolean = false) => {
-    if (isFolder) return <FolderOpen color="primary" />;
-    
+  const getFileIcon = (contentType: string) => {
     if (contentType.startsWith('image/')) return <Image color="success" />;
     if (contentType.startsWith('video/')) return <VideoFile color="error" />;
     if (contentType.startsWith('audio/')) return <AudioFile color="warning" />;
@@ -374,50 +164,50 @@ export default function BucketView() {
   };
 
   if (!bucket) {
-    return <Typography color="error">No bucket specified</Typography>;
+    return <Typography color="error" sx={{ p: 3 }}>No bucket specified</Typography>;
   }
 
+  const itemCount = sortedFolders.length + sortedFiles.length;
+
   return (
-    <Box sx={{ p: 3, minHeight: '100vh' }}>
-      {/* Header */}
+    <Box sx={{ p: 3 }}>
       <Paper elevation={1} sx={{ p: 3, mb: 3, borderRadius: 2 }}>
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
           <Typography variant="h4" sx={{ display: 'flex', alignItems: 'center', gap: 1, fontWeight: 'bold' }}>
             <Folder color="primary" />
             {bucket}
           </Typography>
-          
           <Box sx={{ display: 'flex', gap: 1 }}>
             <Tooltip title="Refresh">
-              <IconButton onClick={() => refetch()} disabled={filesLoading}>
-                <Refresh />
-              </IconButton>
+              <span>
+                <IconButton onClick={() => refetch()} disabled={filesLoading}>
+                  <Refresh />
+                </IconButton>
+              </span>
             </Tooltip>
-            <Tooltip title="Sort Options">
+            <Tooltip title={sortOrder === 'asc' ? 'Sort ascending' : 'Sort descending'}>
               <IconButton onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}>
                 {sortOrder === 'asc' ? <KeyboardArrowUp /> : <KeyboardArrowDown />}
               </IconButton>
             </Tooltip>
           </Box>
         </Box>
-        
-        {/* Breadcrumb Navigation */}
+
         <Breadcrumbs separator={<NavigateNext fontSize="small" />} sx={{ mb: 2 }}>
-          {breadcrumbItems.map((item, index) => (
+          {crumbs.map((item, index) => (
             <Link
               key={item.path}
-              color={index === breadcrumbItems.length - 1 ? 'text.primary' : 'inherit'}
+              color={index === crumbs.length - 1 ? 'text.primary' : 'inherit'}
               underline="hover"
               sx={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 0.5 }}
-              onClick={() => navigateToFolder(item.path)}
+              onClick={() => setCurrentPath(item.path)}
             >
               {index === 0 && <Home fontSize="small" />}
               {item.name}
             </Link>
           ))}
         </Breadcrumbs>
-        
-        {/* Bucket Stats */}
+
         {bucketStats && (
           <Grid container spacing={2}>
             <Grid item xs={6} sm={3}>
@@ -456,19 +246,16 @@ export default function BucketView() {
         )}
       </Paper>
 
-      {/* Search and Filters */}
       <Paper elevation={1} sx={{ p: 2, mb: 3, borderRadius: 2 }}>
         <Grid container spacing={2} alignItems="center">
           <Grid item xs={12} md={6}>
             <TextField
               fullWidth
               variant="outlined"
-              placeholder="Search files and folders..."
+              placeholder="Filter files and folders..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              InputProps={{
-                startAdornment: <Search sx={{ mr: 1, color: 'text.secondary' }} />,
-              }}
+              InputProps={{ startAdornment: <Search sx={{ mr: 1, color: 'text.secondary' }} /> }}
               size="small"
             />
           </Grid>
@@ -487,218 +274,185 @@ export default function BucketView() {
                 size="small"
                 startIcon={<Sort />}
                 onClick={() => {
-                  const options = ['name', 'size', 'date'];
-                  const currentIndex = options.indexOf(sortBy);
-                  const nextIndex = (currentIndex + 1) % options.length;
-                  setSortBy(options[nextIndex] as 'name' | 'size' | 'date');
+                  const options: SortBy[] = ['name', 'size', 'date'];
+                  setSortBy(options[(options.indexOf(sortBy) + 1) % options.length]);
                 }}
               >
-                Sort: {sortBy.charAt(0).toUpperCase() + sortBy.slice(1)}
+                Sort: {sortBy}
               </Button>
             </Box>
           </Grid>
         </Grid>
       </Paper>
 
-      {/* Upload Area */}
-      <Paper 
-        elevation={isDragActive ? 8 : 1} 
-        sx={{ 
-          mb: 3, 
-          borderRadius: 2,
+      <Paper
+        elevation={isDragActive ? 8 : 1}
+        sx={{
+          mb: 1, borderRadius: 2,
           border: isDragActive ? '3px dashed #1976d2' : '2px dashed #e0e0e0',
-          transition: 'all 0.3s ease',
-          transform: isDragActive ? 'scale(1.02)' : 'scale(1)'
+          transition: 'all 0.2s ease',
         }}
       >
         <CardContent>
-          <Box
-            {...getRootProps()}
-            sx={{
-              textAlign: 'center',
-              py: 6,
-              cursor: 'pointer',
-              backgroundColor: isDragActive ? 'primary.50' : 'transparent',
-              borderRadius: 1,
-              transition: 'background-color 0.3s ease',
-            }}
-          >
+          <Box {...getRootProps()} sx={{ textAlign: 'center', py: 6, cursor: 'pointer' }}>
             <input {...getInputProps()} />
             <CloudUpload sx={{ fontSize: 64, color: 'primary.main', mb: 2 }} />
             <Typography variant="h5" gutterBottom color="primary">
               {isDragActive ? 'Drop files here' : 'Drag & drop files here, or click to select'}
             </Typography>
             <Typography color="textSecondary" variant="body1">
-              Upload files to {currentPath ? `/${currentPath}` : ''} in the {bucket} bucket
+              Upload files to {currentPath ? `/${currentPath}` : 'the bucket root'}
             </Typography>
           </Box>
         </CardContent>
       </Paper>
 
-      {/* Upload Progress */}
+      <Box sx={{ mb: 3 }}>
+        <Button
+          size="small"
+          startIcon={<Tune />}
+          endIcon={uploadOptionsOpen ? <ExpandLess /> : <ExpandMore />}
+          onClick={() => setUploadOptionsOpen(!uploadOptionsOpen)}
+        >
+          Upload options {uploadOptions.compress === false || uploadOptions.encrypt ? '(customized)' : ''}
+        </Button>
+        <Collapse in={uploadOptionsOpen}>
+          <Paper sx={{ p: 2, mt: 1, borderRadius: 2 }}>
+            <Grid container spacing={2} alignItems="center">
+              <Grid item>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={uploadOptions.compress !== false}
+                      onChange={(e) => setUploadOptions((o) => ({ ...o, compress: e.target.checked }))}
+                    />
+                  }
+                  label="Compress (server default if unset)"
+                />
+              </Grid>
+              <Grid item>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={!!uploadOptions.encrypt}
+                      onChange={(e) => setUploadOptions((o) => ({ ...o, encrypt: e.target.checked || undefined }))}
+                    />
+                  }
+                  label="Encrypt"
+                />
+              </Grid>
+              {uploadOptions.encrypt && (
+                <Grid item xs={12} sm={4}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel>Encryption key</InputLabel>
+                    <Select
+                      label="Encryption key"
+                      value={uploadOptions.encryption_key_id ?? ''}
+                      onChange={(e) => setUploadOptions((o) => ({ ...o, encryption_key_id: e.target.value || undefined }))}
+                    >
+                      <MenuItem value="">Server default key</MenuItem>
+                      {encryptionKeys.map((k: EncryptionKeyInfo) => (
+                        <MenuItem key={k.key_id} value={k.key_id}>
+                          {k.description || k.key_id.slice(0, 12)}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                </Grid>
+              )}
+            </Grid>
+          </Paper>
+        </Collapse>
+      </Box>
+
       {uploadMutation.isPending && (
         <Alert severity="info" sx={{ mb: 2, borderRadius: 2 }}>
           <LinearProgress sx={{ mt: 1 }} />
           Uploading file...
         </Alert>
       )}
-
-      {/* Error Messages */}
-      {filesError && (
-        <Alert severity="error" sx={{ mb: 2, borderRadius: 2 }}>
-          Failed to load files: {filesError.message}
-        </Alert>
+      {filesError instanceof Error && (
+        <Alert severity="error" sx={{ mb: 2, borderRadius: 2 }}>Failed to load files: {filesError.message}</Alert>
       )}
 
-      {uploadMutation.error && (
-        <Alert severity="error" sx={{ mb: 2, borderRadius: 2 }}>
-          Upload failed: {uploadMutation.error.message}
-        </Alert>
-      )}
-
-      {/* Files and Folders List */}
       <Paper elevation={1} sx={{ borderRadius: 2 }}>
         <CardContent>
           <Typography variant="h6" sx={{ mb: 2, display: 'flex', alignItems: 'center', gap: 1 }}>
             <InsertDriveFile />
             {currentPath ? `Contents of /${currentPath}` : 'Root Directory'}
-            <Chip 
-              label={`${filteredItems.folders.length + filteredItems.files.length} items`} 
-              size="small" 
-              color="primary" 
-              variant="outlined"
-            />
+            <Chip label={`${itemCount} items`} size="small" color="primary" variant="outlined" />
           </Typography>
-          
+
           {filesLoading ? (
             <LinearProgress />
-          ) : filteredItems.folders.length === 0 && filteredItems.files.length === 0 ? (
+          ) : itemCount === 0 ? (
             <Box sx={{ textAlign: 'center', py: 8 }}>
               <Folder sx={{ fontSize: 64, color: 'text.secondary', mb: 2 }} />
               <Typography color="textSecondary" variant="h6" gutterBottom>
                 {searchTerm ? 'No files match your search' : 'This folder is empty'}
               </Typography>
-              <Typography color="textSecondary" variant="body2">
-                {searchTerm ? 'Try adjusting your search terms' : 'Upload some files to get started!'}
-              </Typography>
             </Box>
           ) : (
             <List>
-              {/* Folders */}
-              {filteredItems.folders.map((folder, index) => (
-                <React.Fragment key={folder.path}>
-                  <ListItem 
-                    sx={{ 
-                      borderRadius: 1, 
-                      mb: 0.5,
-                      '&:hover': { backgroundColor: 'primary.50' }
-                    }}
-                  >
-                    <ListItemIcon
-                      onClick={() => navigateToFolder(folder.path)}
-                      sx={{ cursor: 'pointer' }}
-                    >
-                      {getFileIcon('', true)}
-                    </ListItemIcon>
-                    <ListItemText
-                      onClick={() => navigateToFolder(folder.path)}
-                      sx={{ cursor: 'pointer' }}
-                      primary={
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-                          <Typography variant="subtitle1" fontWeight="medium">
-                            {folder.displayName}
-                          </Typography>
-                          <Chip 
-                            label={`${folder.fileCount || 0} files`} 
-                            size="small" 
-                            color="primary" 
-                            variant="outlined"
-                          />
-                          <Chip 
-                            label={formatBytes(folder.size || 0)} 
-                            size="small" 
-                            color="secondary" 
-                            variant="outlined"
-                          />
-                        </Box>
-                      }
-                      secondary={
-                        <Typography variant="caption" color="textSecondary">
-                          Folder • Total: {formatBytes(folder.size || 0)} • {folder.fileCount || 0} files
-                        </Typography>
-                      }
-                    />
-                    <ListItemSecondaryAction>
-                      <IconButton
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleFolderMenuClick(e, folder);
-                        }}
-                        edge="end"
-                      >
-                        <MoreVert />
-                      </IconButton>
-                    </ListItemSecondaryAction>
-                  </ListItem>
-                  {index < filteredItems.folders.length - 1 && <Divider />}
-                </React.Fragment>
-              ))}
-
-              {/* Files */}
-              {filteredItems.files.map((fileItem, index) => (
-                <React.Fragment key={fileItem.path}>
-                  <ListItem 
-                    sx={{ 
-                      borderRadius: 1, 
-                      mb: 0.5,
-                      '&:hover': { backgroundColor: 'grey.50' }
-                    }}
-                  >
-                    <ListItemIcon>
-                      {getFileIcon(fileItem.file!.content_type)}
-                    </ListItemIcon>
-                    <ListItemText
-                      primary={
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-                          <Typography variant="subtitle1" fontWeight="medium">
-                            {fileItem.displayName}
-                          </Typography>
-                          <Chip 
-                            label={formatBytes(fileItem.size!)} 
-                            size="small" 
-                            color="info" 
-                            variant="outlined"
-                          />
-                          {fileItem.file!.is_compressed && (
-                            <Chip label="Compressed" size="small" color="primary" />
-                          )}
-                          {fileItem.file!.is_encrypted && (
-                            <Chip label="Encrypted" size="small" color="secondary" />
-                          )}
-                        </Box>
-                      }
-                      secondary={
-                        <Box>
-                          <Typography variant="body2" color="textSecondary">
-                            {fileItem.file!.content_type}
-                          </Typography>
-                          <Typography variant="caption" color="textSecondary">
-                            Uploaded: {new Date(fileItem.file!.upload_time).toLocaleDateString()} • 
-                            Access Count: {fileItem.file!.access_count}
-                          </Typography>
-                        </Box>
-                      }
-                    />
-                    <ListItemSecondaryAction>
-                      <IconButton
-                        onClick={(e) => handleMenuClick(e, fileItem.file!)}
-                        edge="end"
-                      >
-                        <MoreVert />
-                      </IconButton>
-                    </ListItemSecondaryAction>
-                  </ListItem>
-                  {index < filteredItems.files.length - 1 && <Divider />}
+              {(showFoldersFirst ? [...sortedFolders, ...sortedFiles] : [...sortedFiles, ...sortedFolders]).map((item, index, arr) => (
+                <React.Fragment key={item.path}>
+                  {item.type === 'folder' ? (
+                    <ListItem sx={{ borderRadius: 1, mb: 0.5, '&:hover': { backgroundColor: 'action.hover' } }}>
+                      <ListItemIcon onClick={() => setCurrentPath(item.path)} sx={{ cursor: 'pointer' }}>
+                        <FolderOpen color="primary" />
+                      </ListItemIcon>
+                      <ListItemText
+                        onClick={() => setCurrentPath(item.path)}
+                        sx={{ cursor: 'pointer' }}
+                        primaryTypographyProps={{ component: 'div' }}
+                        primary={
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                            <Typography variant="subtitle1" fontWeight="medium">{item.name}</Typography>
+                            <Chip label={`${item.fileCount} files`} size="small" color="primary" variant="outlined" />
+                            <Chip label={formatBytes(item.totalSize)} size="small" color="secondary" variant="outlined" />
+                          </Box>
+                        }
+                      />
+                      <ListItemSecondaryAction>
+                        <IconButton
+                          onClick={(e) => { setFolderMenuAnchor(e.currentTarget); setMenuFolder(item); }}
+                          edge="end"
+                        >
+                          <MoreVert />
+                        </IconButton>
+                      </ListItemSecondaryAction>
+                    </ListItem>
+                  ) : (
+                    <ListItem sx={{ borderRadius: 1, mb: 0.5, '&:hover': { backgroundColor: 'action.hover' } }}>
+                      <ListItemIcon>{getFileIcon(item.file.content_type)}</ListItemIcon>
+                      <ListItemText
+                        primaryTypographyProps={{ component: 'div' }}
+                        secondaryTypographyProps={{ component: 'div' }}
+                        primary={
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                            <Typography variant="subtitle1" fontWeight="medium">{item.name}</Typography>
+                            <Chip label={formatBytes(item.file.file_size)} size="small" color="info" variant="outlined" />
+                            {item.file.is_compressed && <Chip label="Compressed" size="small" color="primary" />}
+                            {item.file.is_encrypted && <Chip label="Encrypted" size="small" color="secondary" />}
+                          </Box>
+                        }
+                        secondary={
+                          <Box>
+                            <Typography variant="body2" color="textSecondary">{item.file.content_type}</Typography>
+                            <Typography variant="caption" color="textSecondary">
+                              Uploaded: {new Date(item.file.upload_time).toLocaleDateString()} • Access count: {item.file.access_count}
+                            </Typography>
+                          </Box>
+                        }
+                      />
+                      <ListItemSecondaryAction>
+                        <IconButton onClick={(e) => { setFileMenuAnchor(e.currentTarget); setMenuFile(item.file); }} edge="end">
+                          <MoreVert />
+                        </IconButton>
+                      </ListItemSecondaryAction>
+                    </ListItem>
+                  )}
+                  {index < arr.length - 1 && <Divider />}
                 </React.Fragment>
               ))}
             </List>
@@ -706,56 +460,45 @@ export default function BucketView() {
         </CardContent>
       </Paper>
 
-      {/* Floating Action Button */}
-      <Fab
-        color="primary"
-        aria-label="upload"
-        sx={{ position: 'fixed', bottom: 16, right: 16 }}
-        {...getRootProps()}
-      >
+      <Fab color="primary" aria-label="upload" sx={{ position: 'fixed', bottom: 16, right: 16 }} {...getRootProps()}>
         <input {...getInputProps()} />
         <CloudUpload />
       </Fab>
 
-      {/* File Menu */}
-      <Menu
-        anchorEl={anchorEl}
-        open={Boolean(anchorEl)}
-        onClose={handleMenuClose}
-      >
-        <MenuItem onClick={() => menuFile && handleDownload(menuFile)}>
+      <Menu anchorEl={fileMenuAnchor} open={Boolean(fileMenuAnchor)} onClose={() => setFileMenuAnchor(null)}>
+        <MenuItem onClick={() => { menuFile && handleDownload(menuFile); setFileMenuAnchor(null); }}>
           <ListItemIcon><Download /></ListItemIcon>
           Download
         </MenuItem>
-        <MenuItem onClick={() => menuFile && handleFileInfo(menuFile)}>
+        <MenuItem onClick={() => { menuFile && handleFileInfo(menuFile); setFileMenuAnchor(null); }}>
           <ListItemIcon><Info /></ListItemIcon>
           File Info
         </MenuItem>
         <Divider />
-        <MenuItem onClick={() => menuFile && handleDelete(menuFile)} sx={{ color: 'error.main' }}>
+        <MenuItem
+          onClick={() => { setFileToDelete(menuFile); setFileMenuAnchor(null); }}
+          sx={{ color: 'error.main' }}
+        >
           <ListItemIcon><Delete color="error" /></ListItemIcon>
           Delete
         </MenuItem>
       </Menu>
 
-      {/* Folder Menu */}
-      <Menu
-        anchorEl={folderMenuAnchorEl}
-        open={Boolean(folderMenuAnchorEl)}
-        onClose={handleFolderMenuClose}
-      >
-        <MenuItem onClick={() => menuFolder && navigateToFolder(menuFolder.path)}>
+      <Menu anchorEl={folderMenuAnchor} open={Boolean(folderMenuAnchor)} onClose={() => setFolderMenuAnchor(null)}>
+        <MenuItem onClick={() => { menuFolder && setCurrentPath(menuFolder.path); setFolderMenuAnchor(null); }}>
           <ListItemIcon><FolderOpen /></ListItemIcon>
           Open Folder
         </MenuItem>
         <Divider />
-        <MenuItem onClick={() => menuFolder && handleDeleteFolder(menuFolder)} sx={{ color: 'error.main' }}>
+        <MenuItem
+          onClick={() => { setFolderToDelete(menuFolder); setFolderMenuAnchor(null); }}
+          sx={{ color: 'error.main' }}
+        >
           <ListItemIcon><DeleteForever color="error" /></ListItemIcon>
           Delete Folder & All Files
         </MenuItem>
       </Menu>
 
-      {/* File Info Dialog */}
       <Dialog open={fileInfoOpen} onClose={() => setFileInfoOpen(false)} maxWidth="md" fullWidth>
         <DialogTitle>File Information</DialogTitle>
         <DialogContent>
@@ -767,7 +510,10 @@ export default function BucketView() {
               </Grid>
               <Grid item xs={12} sm={6}>
                 <Typography variant="subtitle2" color="textSecondary">Size</Typography>
-                <Typography variant="body1" gutterBottom>{formatBytes(selectedFile.file_size)}</Typography>
+                <Typography variant="body1" gutterBottom>
+                  {formatBytes(selectedFile.file_size)}
+                  {selectedFile.is_compressed && ` (from ${formatBytes(selectedFile.original_size)})`}
+                </Typography>
               </Grid>
               <Grid item xs={12} sm={6}>
                 <Typography variant="subtitle2" color="textSecondary">Content Type</Typography>
@@ -810,7 +556,10 @@ export default function BucketView() {
               {selectedFile.is_encrypted && (
                 <Grid item xs={12} sm={6}>
                   <Typography variant="subtitle2" color="textSecondary">Encryption</Typography>
-                  <Typography variant="body1" gutterBottom>{selectedFile.encryption_algorithm}</Typography>
+                  <Typography variant="body1" gutterBottom>
+                    {selectedFile.encryption_algorithm}
+                    {selectedFile.encryption_key_id && ` • Key: ${selectedFile.encryption_key_id.slice(0, 12)}...`}
+                  </Typography>
                 </Grid>
               )}
             </Grid>
@@ -821,8 +570,7 @@ export default function BucketView() {
         </DialogActions>
       </Dialog>
 
-      {/* Delete Confirmation Dialog */}
-      <Dialog open={deleteDialogOpen} onClose={() => setDeleteDialogOpen(false)}>
+      <Dialog open={!!fileToDelete} onClose={() => setFileToDelete(null)}>
         <DialogTitle>Confirm Delete</DialogTitle>
         <DialogContent>
           <Typography>
@@ -830,61 +578,46 @@ export default function BucketView() {
           </Typography>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setDeleteDialogOpen(false)}>Cancel</Button>
-          <Button onClick={confirmDelete} color="error" disabled={deleteMutation.isPending}>
+          <Button onClick={() => setFileToDelete(null)}>Cancel</Button>
+          <Button
+            onClick={() => fileToDelete && deleteMutation.mutate({ key: fileToDelete.key })}
+            color="error"
+            disabled={deleteMutation.isPending}
+          >
             {deleteMutation.isPending ? 'Deleting...' : 'Delete'}
           </Button>
         </DialogActions>
       </Dialog>
 
-      {/* Delete Folder Confirmation Dialog */}
-      <Dialog open={deleteFolderDialogOpen} onClose={() => !isDeletingFolder && setDeleteFolderDialogOpen(false)}>
+      <Dialog open={!!folderToDelete} onClose={() => !isDeletingFolder && setFolderToDelete(null)}>
         <DialogTitle>Confirm Delete Folder</DialogTitle>
         <DialogContent>
           {!isDeletingFolder ? (
             <>
-              <Alert severity="warning" sx={{ mb: 2 }}>
-                This will permanently delete the folder and all its contents!
-              </Alert>
+              <Alert severity="warning" sx={{ mb: 2 }}>This will permanently delete the folder and all its contents!</Alert>
               <Typography gutterBottom>
-                Are you sure you want to delete the folder <strong>"{folderToDelete?.displayName}"</strong>?
+                Are you sure you want to delete the folder <strong>"{folderToDelete?.name}"</strong>?
               </Typography>
               <Typography variant="body2" color="textSecondary" gutterBottom>
-                • This folder contains <strong>{folderToDelete?.fileCount || 0} files</strong>
-              </Typography>
-              <Typography variant="body2" color="textSecondary" gutterBottom>
-                • Total size: <strong>{formatBytes(folderToDelete?.size || 0)}</strong>
-              </Typography>
-              <Typography variant="body2" color="error" sx={{ mt: 2 }}>
-                This action cannot be undone!
+                • Contains <strong>{folderToDelete?.fileCount ?? 0} files</strong>, total <strong>{formatBytes(folderToDelete?.totalSize ?? 0)}</strong>
               </Typography>
             </>
           ) : (
             <>
-              <Alert severity="info" sx={{ mb: 2 }}>
-                Deleting folder and all files... Please wait.
-              </Alert>
+              <Alert severity="info" sx={{ mb: 2 }}>Deleting folder and all files... Please wait.</Alert>
               <LinearProgress sx={{ mt: 2 }} />
-              <Typography variant="body2" color="textSecondary" sx={{ mt: 2, textAlign: 'center' }}>
-                Deleting {folderToDelete?.fileCount || 0} files...
-              </Typography>
             </>
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setDeleteFolderDialogOpen(false)} disabled={isDeletingFolder}>
-            Cancel
-          </Button>
-          <Button 
-            onClick={confirmDeleteFolder} 
-            color="error" 
-            variant="contained"
-            disabled={isDeletingFolder}
-          >
+          <Button onClick={() => setFolderToDelete(null)} disabled={isDeletingFolder}>Cancel</Button>
+          <Button onClick={confirmDeleteFolder} color="error" variant="contained" disabled={isDeletingFolder}>
             {isDeletingFolder ? 'Deleting...' : 'Delete Folder & All Files'}
           </Button>
         </DialogActions>
       </Dialog>
+
+      <Snackbar open={!!snackbar} autoHideDuration={4000} onClose={() => setSnackbar(null)} message={snackbar} />
     </Box>
   );
-} 
+}
