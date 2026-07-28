@@ -16,6 +16,7 @@ use crate::{
         bucket_handlers,
         file_handlers,
         health_handler,
+        key_handlers,
     },
 };
 
@@ -25,9 +26,10 @@ use tracing::{warn, info};
 use serde::Deserialize;
 use std::time::Duration;
 
-// Concurrency limits to prevent overwhelming the service
+// Concurrency limits to prevent overwhelming the service.
+// Max upload size is enforced per-request from config.storage.max_file_size (see
+// handlers::file_handlers::upload_file), not a fixed constant here.
 const MAX_CONCURRENT_REQUESTS: usize = 100;
-const MAX_REQUEST_BODY_SIZE: usize = 1024 * 1024 * 1024; // 1GB (increased from 500MB)
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes (increased from 2 minutes)
 
 #[derive(Debug, Deserialize, Clone)]
@@ -48,6 +50,9 @@ pub struct SearchQuery {
 pub struct AppState {
     pub storage: Arc<RwLock<crate::storage::StorageManager>>,
     pub request_semaphore: Arc<Semaphore>,
+    /// Present only when S3_ACCESS_KEY/S3_SECRET_KEY are configured - gates whether the /v2
+    /// S3-compatible router is mounted at all.
+    pub s3_config: Option<Arc<crate::config::S3Config>>,
 }
 
 
@@ -105,6 +110,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/search", get(file_handlers::search_files))
         .route("/buckets/:bucket/files/*path", get(file_handlers::handle_file_request))
         .route("/buckets/:bucket/files/*path", delete(file_handlers::handle_file_delete))
+        .route("/keys", post(key_handlers::create_key))
+        .route("/keys", get(key_handlers::list_keys))
+        .route("/keys/:key_id", delete(key_handlers::deactivate_key))
         .layer(
             ServiceBuilder::new()
                 .layer(middleware::from_fn_with_state(state.clone(), concurrency_limiter))
@@ -112,6 +120,11 @@ pub fn create_router(state: AppState) -> Router {
                 .layer(cors)
         );
 
-    // Merge routers
-    upload_router.merge(main_router).with_state(state)
-} 
+    let mut router = upload_router.merge(main_router);
+    if state.s3_config.is_some() {
+        router = router.merge(crate::s3::router());
+        info!("🪣 S3-compatible v2 API mounted at /v2");
+    }
+
+    router.with_state(state)
+}

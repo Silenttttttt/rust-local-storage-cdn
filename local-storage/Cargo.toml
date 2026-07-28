@@ -31,6 +31,9 @@ sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chron
 # Redis
 redis = { version = "0.24", features = ["tokio-comp", "connection-manager", "aio"] }
 
+# In-process cache (default cache backend; Redis is opt-in via CACHE_BACKEND=redis)
+moka = { version = "0.12", features = ["future"] }
+
 # File operations
 blake3 = "1.5"
 md5 = "0.7"
@@ -46,6 +49,11 @@ zstd = "0.13"
 aes-gcm = "0.10"
 chacha20poly1305 = "0.10"
 rand = "0.8"
+
+# S3 v2 API: SigV4 request signing/verification + XML request/response bodies
+hmac = "0.12"
+sha2 = "0.10"
+quick-xml = { version = "0.31", features = ["serialize"] }
 
 # Configuration
 config = "0.14"

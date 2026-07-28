@@ -9,8 +9,7 @@ pub mod models;
 pub mod database;
 pub mod errors;
 pub mod encryption_keys;
-pub mod cache_manager;
 pub mod performance_optimizations;
-pub mod optimized_storage;
+pub mod s3;
 
 pub use errors::{StorageError, Result}; 

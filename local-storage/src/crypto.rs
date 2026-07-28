@@ -140,6 +140,58 @@ impl CryptoManager {
         self.decrypt(data, algorithm).await
     }
 
+    /// Encrypt with an explicit key (e.g. a per-file key looked up via EncryptionKeyManager),
+    /// instead of the single global key derived from CRYPTO_KEY at startup.
+    pub fn encrypt_with_key(&self, data: &[u8], algorithm: EncryptionAlgorithm, key_bytes: &[u8]) -> Result<Vec<u8>> {
+        if key_bytes.len() != 32 {
+            return Err(StorageError::Encryption("Key must be exactly 32 bytes".to_string()));
+        }
+
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
+
+        let ciphertext = match algorithm {
+            EncryptionAlgorithm::AesGcm => {
+                let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key_bytes));
+                cipher.encrypt(Nonce::from_slice(&nonce_bytes), data)
+                    .map_err(|e| StorageError::Encryption(format!("AES encryption failed: {}", e)))?
+            }
+            EncryptionAlgorithm::ChaCha20Poly1305 => {
+                let cipher = ChaCha20Poly1305::new(ChaChaKey::from_slice(key_bytes));
+                cipher.encrypt(ChaChaNonce::from_slice(&nonce_bytes), data)
+                    .map_err(|e| StorageError::Encryption(format!("ChaCha20 encryption failed: {}", e)))?
+            }
+        };
+
+        let mut result = Vec::with_capacity(12 + ciphertext.len());
+        result.extend_from_slice(&nonce_bytes);
+        result.extend_from_slice(&ciphertext);
+        Ok(result)
+    }
+
+    /// Decrypt with an explicit key.
+    pub fn decrypt_with_key(&self, encrypted_data: &[u8], algorithm: EncryptionAlgorithm, key_bytes: &[u8]) -> Result<Vec<u8>> {
+        if key_bytes.len() != 32 {
+            return Err(StorageError::Encryption("Key must be exactly 32 bytes".to_string()));
+        }
+        if encrypted_data.len() < 12 {
+            return Err(StorageError::Encryption("Invalid encrypted data: too short".to_string()));
+        }
+        let (nonce_bytes, ciphertext) = encrypted_data.split_at(12);
+        match algorithm {
+            EncryptionAlgorithm::AesGcm => {
+                let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key_bytes));
+                cipher.decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
+                    .map_err(|e| StorageError::Encryption(format!("AES decryption failed: {}", e)))
+            }
+            EncryptionAlgorithm::ChaCha20Poly1305 => {
+                let cipher = ChaCha20Poly1305::new(ChaChaKey::from_slice(key_bytes));
+                cipher.decrypt(ChaChaNonce::from_slice(nonce_bytes), ciphertext)
+                    .map_err(|e| StorageError::Encryption(format!("ChaCha20 decryption failed: {}", e)))
+            }
+        }
+    }
+
     fn encrypt_aes(&self, data: &[u8]) -> Result<Vec<u8>> {
         let cipher = self.aes_key.as_ref().ok_or_else(|| {
             StorageError::Encryption("AES cipher not initialized".to_string())

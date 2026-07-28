@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::borrow::Cow;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 use crate::{
     config::DatabaseConfig,
@@ -8,7 +8,7 @@ use crate::{
     errors::{Result, StorageError},
 };
 use sqlx::types::BigDecimal;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 pub struct DatabaseManager {
     pool: PgPool,
@@ -253,12 +253,27 @@ impl DatabaseManager {
         Ok(files)
     }
 
+    /// Lists buckets from the `buckets` table itself, not derived from `files` - a bucket with
+    /// zero files (e.g. just created) still exists and should be listed.
+    /// Uses the runtime-checked query form since there's no live DB here to regenerate the
+    /// offline sqlx cache for this (previously-different) query text.
     pub async fn list_buckets(&self) -> Result<Vec<String>> {
-        let rows = sqlx::query!("SELECT DISTINCT bucket FROM files ORDER BY bucket")
+        let rows = sqlx::query("SELECT name FROM buckets WHERE is_active = true ORDER BY name")
             .fetch_all(&self.pool)
             .await?;
 
-        Ok(rows.into_iter().map(|row| row.bucket).collect())
+        Ok(rows.into_iter().map(|row| row.get::<String, _>("name")).collect())
+    }
+
+    pub async fn list_buckets_with_created_at(&self) -> Result<Vec<(String, DateTime<Utc>)>> {
+        let rows = sqlx::query("SELECT name, created_at FROM buckets WHERE is_active = true ORDER BY name")
+            .fetch_all(&self.pool)
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.get::<String, _>("name"), row.get::<DateTime<Utc>, _>("created_at")))
+            .collect())
     }
 
     pub async fn bucket_exists(&self, bucket: &str) -> Result<bool> {

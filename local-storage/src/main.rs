@@ -39,39 +39,27 @@ async fn main() -> Result<()> {
     sqlx::migrate::Migrator::new(migrations).await?.run(&pool).await?;
     info!("📦 Database migrations applied");
 
-    // If DB has no files (e.g. after reset), clear storage to avoid orphan files on disk
-    let should_clear_storage = match sqlx::query("SELECT COUNT(*) FROM files").fetch_one(&pool).await {
+    // If DB has no files but disk has content, warn loudly instead of deleting anything.
+    // A previous version of this service auto-deleted everything under STORAGE_PATH here
+    // whenever the `files` table was empty (e.g. after pointing at a fresh/wrong DB) - that's
+    // a data-loss trap, especially when migrating to a new host where the DB is freshly
+    // provisioned but the storage volume still holds real files. Never delete automatically.
+    let db_is_empty = match sqlx::query("SELECT COUNT(*) FROM files").fetch_one(&pool).await {
         Ok(row) => row.get::<i64, _>(0) == 0,
         Err(_) => false,
     };
-    if should_clear_storage {
+    if db_is_empty {
         let storage_path = Path::new(&config.storage.path);
-        info!("🗑️ DB empty, clearing orphan files from {}", storage_path.display());
-        if storage_path.exists() {
-            // Clear contents only (storage_path may be a mount point - can't remove_dir_all on it)
-            match fs::read_dir(storage_path).await {
-                Ok(mut entries) => {
-                    let mut cleared = 0u32;
-                    while let Ok(Some(entry)) = entries.next_entry().await {
-                        let path = entry.path();
-                        if let Ok(ft) = entry.file_type().await {
-                            let result = if ft.is_dir() {
-                                fs::remove_dir_all(&path).await
-                            } else {
-                                fs::remove_file(&path).await
-                            };
-                            match result {
-                                Ok(()) => cleared += 1,
-                                Err(e) => warn!("⚠️ Failed to remove {}: {}", path.display(), e),
-                            }
-                        }
-                    }
-                    info!("🗑️ Cleared storage: removed {} orphan entries", cleared);
-                }
-                Err(e) => warn!("⚠️ Failed to read storage dir (orphan cleanup): {}", e),
+        if let Ok(mut entries) = fs::read_dir(storage_path).await {
+            if entries.next_entry().await.ok().flatten().is_some() {
+                warn!(
+                    "⚠️ Database has no file records, but {} is not empty. \
+                    This usually means the database was reset/repointed while old files remain on disk. \
+                    Files on disk are orphaned from the DB's perspective and will not be served. \
+                    Nothing was deleted - investigate before doing anything destructive.",
+                    storage_path.display()
+                );
             }
-        } else {
-            info!("🗑️ Storage path does not exist yet, nothing to clear");
         }
     }
 
@@ -84,9 +72,14 @@ async fn main() -> Result<()> {
     info!("🚦 Concurrency limiter initialized (max: 100 concurrent requests)");
 
     // Create app state
-    let state = AppState { 
+    let s3_config = config.s3.clone().map(Arc::new);
+    if s3_config.is_none() {
+        info!("ℹ️ S3 v2 API disabled - set S3_ACCESS_KEY and S3_SECRET_KEY to enable it");
+    }
+    let state = AppState {
         storage,
         request_semaphore,
+        s3_config,
     };
     info!("🔧 Application state created");
 

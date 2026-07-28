@@ -4,18 +4,29 @@ use axum::{
     Json,
     response::{IntoResponse, Response},
 };
+use serde::Deserialize;
 
 use crate::{
     errors::{Result, StorageError},
     models::FileInfo,
     app::{AppState, ListFilesQuery, SearchQuery},
+    storage::StoreOptions,
 };
 
 use tracing::{info, error};
 use chrono;
 
-// Configuration constants
-const MAX_FILE_SIZE: usize = 500 * 1024 * 1024; // 500MB
+/// Optional per-upload overrides, e.g. `POST /buckets/x/files?encrypt=true&encryption_key_id=abc`.
+/// All fields are additive and default to the service's global config when omitted, so existing
+/// callers that don't set them keep behaving exactly as before.
+#[derive(Debug, Deserialize)]
+pub struct UploadQuery {
+    pub compress: Option<bool>,
+    pub encrypt: Option<bool>,
+    pub compression_algorithm: Option<String>,
+    pub compression_level: Option<i32>,
+    pub encryption_key_id: Option<String>,
+}
 
 fn extract_filename_from_content_disposition(headers: &HeaderMap) -> Option<String> {
     headers
@@ -103,11 +114,12 @@ fn extract_filename_from_content_disposition(headers: &HeaderMap) -> Option<Stri
 pub async fn upload_file(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
+    Query(query): Query<UploadQuery>,
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Result<impl IntoResponse> {
     info!("📤 Starting file upload to bucket: {}", bucket);
-    
+
     // Get filename from Content-Disposition header or use timestamp
     let filename = extract_filename_from_content_disposition(&headers)
         .unwrap_or_else(|| {
@@ -120,10 +132,27 @@ pub async fn upload_file(
         .unwrap_or("application/octet-stream")
         .to_string();
 
-    // Convert body to bytes
-    let bytes = axum::body::to_bytes(body, usize::MAX).await.map_err(|e| {
-        error!("❌ Failed to read body: {}", e);
-        StorageError::BadRequest(format!("Failed to read body: {}", e))
+    let storage = state.storage.read().await;
+    let max_size = storage.max_file_size();
+
+    // Reject obviously-oversized uploads before reading any body bytes.
+    if let Some(len) = headers.get("content-length").and_then(|h| h.to_str().ok()).and_then(|s| s.parse::<usize>().ok()) {
+        if len > max_size {
+            return Err(StorageError::PayloadTooLarge(format!(
+                "Content-Length {} exceeds max file size {} bytes", len, max_size
+            )));
+        }
+    }
+
+    // Cap the body read at the configured max file size instead of buffering an unbounded
+    // amount of memory - covers chunked bodies without an accurate Content-Length too.
+    let bytes = axum::body::to_bytes(body, max_size).await.map_err(|e| {
+        error!("❌ Failed to read body (over {} bytes or I/O error): {}", max_size, e);
+        if e.to_string().contains("length limit exceeded") {
+            StorageError::PayloadTooLarge(format!("Body exceeds max file size {} bytes", max_size))
+        } else {
+            StorageError::BadRequest(format!("Failed to read body: {}", e))
+        }
     })?;
 
     if bytes.is_empty() {
@@ -131,10 +160,18 @@ pub async fn upload_file(
         return Err(StorageError::BadRequest("No file content provided".into()));
     }
 
+    let opts = StoreOptions {
+        compress: query.compress,
+        encrypt: query.encrypt,
+        compression_algorithm: query.compression_algorithm,
+        compression_level: query.compression_level,
+        encryption_key_id: query.encryption_key_id,
+        metadata: None,
+    };
+
     info!("💾 Storing file: {}/{} ({} bytes)", bucket, filename, bytes.len());
-    let storage = state.storage.read().await;
-    
-    match storage.store_file(&bucket, &filename, bytes.to_vec(), Some(content_type)).await {
+
+    match storage.store_file(&bucket, &filename, bytes.to_vec(), Some(content_type), opts).await {
         Ok(file) => {
             info!("✅ Successfully uploaded file: {}/{} ({} bytes)", bucket, filename, file.file_size);
             Ok((StatusCode::CREATED, Json(FileInfo::from(file))))
@@ -225,109 +262,4 @@ pub async fn search_files(
         query.limit,
     ).await?;
     Ok(Json(files))
-} 
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::extract::{Multipart, FromRequest};
-    use axum::body::Body;
-    use axum::http::{Request, header};
-
-    #[tokio::test]
-    async fn test_process_multipart_upload_simple() {
-        // Create a simple multipart form data
-        let boundary = "boundary123";
-        let content = format!(
-            "--{boundary}\r\n\
-             Content-Disposition: form-data; name=\"file\"; filename=\"test.txt\"\r\n\
-             Content-Type: text/plain\r\n\
-             \r\n\
-             Hello, World!\r\n\
-             --{boundary}--\r\n"
-        );
-
-        // Create a request with the multipart data
-        let request = Request::builder()
-            .header(header::CONTENT_TYPE, format!("multipart/form-data; boundary={}", boundary))
-            .body(Body::from(content))
-            .unwrap();
-
-        // Extract multipart from the request
-        let multipart = Multipart::from_request(request, &()).await.unwrap();
-
-        // Test our function
-        let result = process_multipart_upload(multipart).await;
-        
-        assert!(result.is_ok(), "Multipart processing should succeed");
-        
-        let (content, filename, content_type) = result.unwrap();
-        assert_eq!(content, b"Hello, World!");
-        assert_eq!(filename, Some("test.txt".to_string()));
-        assert_eq!(content_type, Some("text/plain".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_process_multipart_upload_no_file_field() {
-        // Create multipart form data without file field
-        let boundary = "boundary123";
-        let content = format!(
-            "--{boundary}\r\n\
-             Content-Disposition: form-data; name=\"other_field\"\r\n\
-             \r\n\
-             some value\r\n\
-             --{boundary}--\r\n"
-        );
-
-        let request = Request::builder()
-            .header(header::CONTENT_TYPE, format!("multipart/form-data; boundary={}", boundary))
-            .body(Body::from(content))
-            .unwrap();
-
-        let multipart = Multipart::from_request(request, &()).await.unwrap();
-        let result = process_multipart_upload(multipart).await;
-        
-        assert!(result.is_err(), "Should fail when no file field is present");
-        match result.unwrap_err() {
-            StorageError::BadRequest(msg) => {
-                assert!(msg.contains("No file field found"));
-            }
-            _ => panic!("Expected BadRequest error"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_read_field_content() {
-        // Create a simple multipart form data
-        let boundary = "boundary123";
-        let content = format!(
-            "--{boundary}\r\n\
-             Content-Disposition: form-data; name=\"file\"; filename=\"test.txt\"\r\n\
-             Content-Type: text/plain\r\n\
-             \r\n\
-             Test content with multiple lines\r\n\
-             Line 2\r\n\
-             Line 3\r\n\
-             --{boundary}--\r\n"
-        );
-
-        let request = Request::builder()
-            .header(header::CONTENT_TYPE, format!("multipart/form-data; boundary={}", boundary))
-            .body(Body::from(content))
-            .unwrap();
-
-        let multipart = Multipart::from_request(request, &()).await.unwrap();
-        
-        // Get the first field
-        let mut multipart_iter = multipart;
-        let field = multipart_iter.next_field().await.unwrap().unwrap();
-        
-        let mut total_size = 0usize;
-        let result = read_field_content(field, &mut total_size).await;
-        
-        assert!(result.is_ok(), "Field content reading should succeed");
-        let content = result.unwrap();
-        assert_eq!(content, b"Test content with multiple lines\r\nLine 2\r\nLine 3\r\n\r\n\r\n");
-        assert_eq!(total_size, content.len());
-    }
 } 

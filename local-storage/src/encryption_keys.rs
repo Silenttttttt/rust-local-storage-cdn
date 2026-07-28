@@ -52,8 +52,9 @@ impl EncryptionKeyManager {
             "#,
             key_id
         )
-        .fetch_one(&self.pool)
-        .await?;
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| StorageError::Validation(format!("Unknown or inactive encryption_key_id: {}", key_id)))?;
 
         Ok(key)
     }

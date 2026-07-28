@@ -7,9 +7,34 @@ pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub redis: RedisConfig,
+    pub cache: CacheSettings,
     pub storage: StorageConfig,
     pub crypto: CryptoConfig,
     pub compression: CompressionConfig,
+    pub s3: Option<S3Config>,
+}
+
+/// The v2 S3-compatible API is opt-in: it's only mounted at /v2 if both S3_ACCESS_KEY and
+/// S3_SECRET_KEY are set. No auto-generated credentials on startup - that would silently change
+/// on every restart and break any client already configured against it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct S3Config {
+    pub access_key: String,
+    pub secret_key: String,
+    pub region: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum CacheBackendKind {
+    Memory,
+    Redis,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheSettings {
+    pub backend: CacheBackendKind,
+    pub max_size_mb: u64,
+    pub ttl_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,15 +54,14 @@ pub struct DatabaseConfig {
     pub url: String,
 }
 
+/// Connection details used only when `CacheSettings.backend == Redis`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedisConfig {
-    pub enabled: bool,
     pub host: String,
     pub port: u16,
     pub password: Option<String>,
     pub database: u8,
     pub max_connections: u32,
-    pub ttl_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,10 +101,6 @@ impl Config {
             },
             database: DatabaseConfig::new()?,
             redis: RedisConfig {
-                enabled: env::var("ENABLE_REDIS")
-                    .unwrap_or_else(|_| "true".to_string())
-                    .parse()
-                    .unwrap_or(true),
                 host: env::var("REDIS_HOST")
                     .unwrap_or_else(|_| "redis".to_string()),
                 port: env::var("REDIS_PORT")
@@ -93,7 +113,22 @@ impl Config {
                 max_connections: env::var("REDIS_MAX_CONNECTIONS")
                     .unwrap_or_else(|_| "10".to_string())
                     .parse()?,
-                ttl_seconds: env::var("REDIS_TTL_SECONDS")
+            },
+            cache: CacheSettings {
+                // CACHE_BACKEND=memory|redis, default memory. Falls back to the legacy
+                // ENABLE_REDIS=true toggle for anyone relying on it, so existing deployments
+                // that already set it don't silently change behavior.
+                backend: match env::var("CACHE_BACKEND").ok().as_deref() {
+                    Some("redis") => CacheBackendKind::Redis,
+                    Some("memory") => CacheBackendKind::Memory,
+                    _ if env::var("ENABLE_REDIS").map(|v| v == "true").unwrap_or(false) => CacheBackendKind::Redis,
+                    _ => CacheBackendKind::Memory,
+                },
+                max_size_mb: env::var("CACHE_MAX_SIZE_MB")
+                    .unwrap_or_else(|_| "256".to_string())
+                    .parse()?,
+                ttl_seconds: env::var("CACHE_TTL_SECONDS")
+                    .or_else(|_| env::var("REDIS_TTL_SECONDS"))
                     .unwrap_or_else(|_| "3600".to_string())
                     .parse()?,
             },
@@ -129,6 +164,16 @@ impl Config {
                 min_size: env::var("COMPRESSION_MIN_SIZE")
                     .unwrap_or_else(|_| "1024".to_string()) // 1KB
                     .parse()?,
+            },
+            s3: match (env::var("S3_ACCESS_KEY").ok(), env::var("S3_SECRET_KEY").ok()) {
+                (Some(access_key), Some(secret_key)) if !access_key.is_empty() && !secret_key.is_empty() => {
+                    Some(S3Config {
+                        access_key,
+                        secret_key,
+                        region: env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
+                    })
+                }
+                _ => None,
             },
         };
 

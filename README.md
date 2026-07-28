@@ -87,7 +87,8 @@ docker compose -f docker-compose.yml -f docker-compose.redis.yml \
 ### Health
 
 ```
-GET /health  →  "OK"
+GET /health  →  200 "OK"          (database and cache both reachable)
+              →  503 "UNHEALTHY"  (otherwise)
 ```
 
 ### Buckets
@@ -104,7 +105,7 @@ GET /health  →  "OK"
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/buckets/:bucket/files` | List files (`?prefix=`, `?limit=`, `?offset=`) |
-| POST | `/buckets/:bucket/files` | Upload file (raw body + `Content-Disposition: filename="..."`) |
+| POST | `/buckets/:bucket/files` | Upload file (raw body + `Content-Disposition: filename="..."`). Optional `?compress=`, `?encrypt=`, `?compression_algorithm=`, `?compression_level=`, `?encryption_key_id=` override the global config per upload. |
 | GET | `/buckets/:bucket/files/*path` | Download file |
 | GET | `/buckets/:bucket/files/*path/info` | File metadata (JSON) |
 | DELETE | `/buckets/:bucket/files/*path` | Delete file |
@@ -115,6 +116,16 @@ GET /health  →  "OK"
 |--------|----------|-------------|
 | GET | `/stats` | Global storage statistics |
 | GET | `/search?query=...` | Search files (`?bucket=` to scope) |
+
+### Encryption Keys
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/keys` | Create a new encryption key (`{"algorithm": "aes-gcm", "description": "..."}`) |
+| GET | `/keys` | List active keys (never returns raw key material) |
+| DELETE | `/keys/:key_id` | Deactivate a key |
+
+Pass a key's `key_id` as `encryption_key_id` on upload to encrypt that file with it instead of the global `CRYPTO_KEY`.
 
 ### Upload Format
 
@@ -131,6 +142,41 @@ Content-Disposition: attachment; filename="document.pdf"
 For nested paths, use `Content-Disposition: attachment; filename="folder/sub/file.txt"`.
 
 ---
+
+## S3-Compatible API (v2)
+
+A second, S3-compatible API is available alongside the native API above, for anything that
+already speaks S3 (aws-cli, boto3, rclone, mc, backup tools, etc). It's opt-in - only mounted
+when `S3_ACCESS_KEY` and `S3_SECRET_KEY` are both set - and lives entirely at `/v2`, so it never
+collides with the native `/buckets/...` routes.
+
+Point any S3 client at `http://host:port/v2` as the endpoint (path-style addressing):
+
+```bash
+aws --endpoint-url http://host:port/v2 s3 ls
+aws --endpoint-url http://host:port/v2 s3 cp file.txt s3://mybucket/
+aws --endpoint-url http://host:port/v2 s3 cp s3://mybucket/file.txt ./file.txt
+
+rclone config create myremote s3 provider=Other endpoint=http://host:port/v2 \
+  access_key_id=$S3_ACCESS_KEY secret_access_key=$S3_SECRET_KEY
+rclone copy ./dir myremote:mybucket
+```
+
+Supported operations: `ListBuckets`, `CreateBucket`, `DeleteBucket`, `ListObjectsV2`,
+`PutObject`, `GetObject`, `HeadObject`, `DeleteObject`, `DeleteObjects` (batch), `CopyObject`
+(via `PUT` with an `x-amz-copy-source` header). Auth is real AWS SigV4 request signing against
+the one configured key pair - no request goes through without a valid signature.
+
+**Not supported yet**: the Multipart Upload API (`CreateMultipartUpload`/`UploadPart`/...) and
+chunked/streaming signed payloads (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`) - both return a clear
+`NotImplemented` error rather than silently misbehaving. Regular (non-chunked) `PutObject` has no
+special size handling beyond the usual `MAX_FILE_SIZE` limit.
+
+| Variable | Default | Description |
+|----------|---------|--------------|
+| `S3_ACCESS_KEY` | — | Enables /v2 when set together with `S3_SECRET_KEY` |
+| `S3_SECRET_KEY` | — | Secret half of the key pair used for SigV4 verification |
+| `S3_REGION` | `us-east-1` | Region string used in the credential scope (arbitrary - there's no real AWS region here) |
 
 ## Backend Configuration
 
@@ -156,16 +202,22 @@ All configuration is via environment variables. Create a `.env` file or pass the
 | `DEFAULT_BUCKET` | `default` | Default bucket name |
 | `ENABLE_DEDUPLICATION` | `true` | Deduplicate by BLAKE3 hash |
 
-### Redis (optional)
+### Cache
+
+Metadata and small file content (≤1MB) are cached read-through, backed by either an in-process
+cache (default - no extra service to run, no network hop) or Redis (opt-in, useful mainly if you
+run multiple replicas and want them sharing a cache).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ENABLE_REDIS` | `false` | Enable Redis cache |
-| `REDIS_HOST` | `redis` | Redis host |
+| `CACHE_BACKEND` | `memory` | `memory` or `redis` |
+| `CACHE_MAX_SIZE_MB` | `256` | Max size of the in-process cache (only used when `CACHE_BACKEND=memory`) |
+| `CACHE_TTL_SECONDS` | `3600` | Cache entry TTL, either backend (falls back to `REDIS_TTL_SECONDS` if set, for backward compatibility) |
+| `ENABLE_REDIS` | `false` | Legacy alias for `CACHE_BACKEND=redis` - still honored if set, but `CACHE_BACKEND` takes precedence |
+| `REDIS_HOST` | `redis` | Redis host (only used when the Redis backend is active) |
 | `REDIS_PORT` | `6379` | Redis port |
 | `REDIS_PASSWORD` | — | Redis password |
 | `REDIS_DB` | `0` | Redis database number |
-| `REDIS_TTL_SECONDS` | `3600` | Cache TTL |
 
 ### Compression
 

@@ -26,6 +26,7 @@ pub enum StorageError {
     Json(String),
     Multipart(String),
     BadRequest(String),
+    PayloadTooLarge(String),
     Database(String),
     Io(String),
     Compression(String),
@@ -98,6 +99,7 @@ impl fmt::Display for StorageError {
             Self::Json(msg) => write!(f, "JSON error: {}", msg),
             Self::Multipart(msg) => write!(f, "Multipart error: {}", msg),
             Self::BadRequest(msg) => write!(f, "Bad request: {}", msg),
+            Self::PayloadTooLarge(msg) => write!(f, "Payload too large: {}", msg),
             Self::Database(msg) => write!(f, "Database error: {}", msg),
             Self::Io(msg) => write!(f, "IO error: {}", msg),
             Self::Compression(msg) => write!(f, "Compression error: {}", msg),
@@ -161,6 +163,10 @@ impl IntoResponse for StorageError {
             Self::BadRequest(msg) => {
                 warn!("❌ Bad request: {}", msg);
                 (StatusCode::BAD_REQUEST, format!("Bad request: {}", msg))
+            },
+            Self::PayloadTooLarge(msg) => {
+                warn!("📦 Payload too large: {}", msg);
+                (StatusCode::PAYLOAD_TOO_LARGE, format!("Payload too large: {}", msg))
             },
             Self::Database(msg) => {
                 error!("🗄️ Database error: {}", msg);

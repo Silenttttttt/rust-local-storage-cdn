@@ -47,6 +47,10 @@ impl TestConfig {
                 password: None,
                 database: 0,
                 max_connections: 10,
+            },
+            cache: crate::config::CacheSettings {
+                backend: crate::config::CacheBackendKind::Memory,
+                max_size_mb: 64,
                 ttl_seconds: 3600,
             },
             storage: StorageConfig {
@@ -66,6 +70,7 @@ impl TestConfig {
                 level: 3,
                 min_size: 1024,
             },
+            s3: None,
         })
     }
 }
