@@ -101,6 +101,7 @@ pub fn create_router(state: AppState) -> Router {
     // Main router for other routes
     let main_router = Router::new()
         .route("/health", get(health_handler::health_check))
+        .route("/health/deep", get(health_handler::health_check_deep))
         .route("/buckets/:bucket/files", get(file_handlers::list_files))
         .route("/buckets/:bucket/stats", get(bucket_handlers::get_bucket_stats))
         .route("/buckets/:bucket", delete(bucket_handlers::delete_bucket))
