@@ -98,8 +98,67 @@ impl StorageManager {
 
         if self.config.storage.enable_deduplication {
             if let Some(existing_file) = self.db.get_file_by_hash(&hash_blake3).await? {
-                info!("♻️ Found duplicate file, reusing: {}/{}", existing_file.bucket, existing_file.key);
-                return Ok(existing_file);
+                // A true re-upload of the exact same (bucket, key) is a no-op - hand back the
+                // existing record as-is.
+                if existing_file.bucket == bucket && existing_file.key == key {
+                    info!("♻️ Identical re-upload, reusing: {}/{}", existing_file.bucket, existing_file.key);
+                    return Ok(existing_file);
+                }
+
+                // Otherwise this is a *new* (bucket, key) whose content happens to already be on
+                // disk (this is exactly the path CopyObject and "upload the same file under a
+                // different name" both take). It must still become its own independently
+                // listable/gettable/deletable record - returning the *existing* file's own
+                // bucket/key here (as this used to) means the caller's requested key is silently
+                // never created: the response reports success but a subsequent GET on the
+                // requested key 404s. Create a new row that points at the same on-disk bytes
+                // instead of writing a second physical copy.
+                if existing_file.is_compressed.unwrap_or(false) != should_compress
+                    || existing_file.is_encrypted.unwrap_or(false) != should_encrypt
+                {
+                    // The physically-stored bytes were processed with whatever settings applied
+                    // at first upload; a dedup hit always reuses those bytes as-is rather than
+                    // re-processing, so make that explicit when the caller asked for something
+                    // different this time.
+                    warn!(
+                        "♻️ Dedup reusing existing bytes for {}/{} whose stored compression/encryption \
+                        settings differ from what this upload requested; the requested settings are ignored",
+                        bucket, key
+                    );
+                }
+
+                info!("♻️ Found duplicate content, aliasing {}/{} -> existing bytes at {}", bucket, key, existing_file.file_path);
+                let aliased = StoredFile {
+                    id: Uuid::new_v4(),
+                    bucket: bucket.to_string(),
+                    key: key.to_string(),
+                    filename: key.split('/').last().unwrap_or(key).to_string(),
+                    file_path: existing_file.file_path.clone(),
+                    file_size: existing_file.file_size,
+                    original_size: existing_file.original_size,
+                    content_type: content_type.unwrap_or(existing_file.content_type),
+                    hash_blake3: hash_blake3.clone(),
+                    hash_md5: hash_md5.clone(),
+                    metadata: opts.metadata,
+                    is_compressed: existing_file.is_compressed,
+                    is_encrypted: existing_file.is_encrypted,
+                    compression_algorithm: existing_file.compression_algorithm.clone(),
+                    encryption_algorithm: existing_file.encryption_algorithm.clone(),
+                    compression_ratio: existing_file.compression_ratio,
+                    upload_time: Some(chrono::Utc::now()),
+                    last_accessed: None,
+                    access_count: 0,
+                    encryption_key_id: existing_file.encryption_key_id.clone(),
+                    compression_enabled: existing_file.compression_enabled,
+                    encryption_enabled: existing_file.encryption_enabled,
+                    compression_level: existing_file.compression_level,
+                    cache_status: Some("not_cached".to_string()),
+                    last_cache_update: None,
+                    cache_hits: Some(0),
+                    cache_priority: Some(0),
+                };
+                self.db.save_file(&aliased).await?;
+                return Ok(aliased);
             }
         }
 
@@ -115,10 +174,16 @@ impl StorageManager {
             };
             let compressor = CompressionManager::new(Arc::new(compression_config));
             match compressor.compress(&processed_content) {
-                Ok(compressed) => {
+                // Small/incompressible input can come out *larger* than the original once
+                // format-header and frame overhead are added (zstd/gzip both have a fixed
+                // minimum overhead per frame). Only keep the compressed form - and only claim
+                // is_compressed - when it's actually smaller; otherwise the DB's
+                // valid_compression_ratio CHECK (<=1.0) would reject the insert outright.
+                Ok(compressed) if compressed.len() < processed_content.len() => {
                     processed_content = compressed;
                     true
                 }
+                Ok(_) => false,
                 Err(e) => {
                     warn!("⚠️ Compression failed, storing uncompressed: {}", e);
                     false
@@ -241,7 +306,9 @@ impl StorageManager {
         let raw_content = match self.cache.get_file_content(bucket, key).await {
             Ok(Some(cached)) => cached,
             _ => {
-                let file_path = self.get_file_path(bucket, key);
+                // Use the DB-recorded path, not one recomputed from (bucket, key): a
+                // deduplication-aliased row's bytes physically live at a *different* key's path.
+                let file_path = PathBuf::from(&file.file_path);
                 let content = match tokio::fs::read(&file_path).await {
                     Ok(c) => c,
                     Err(e) => {
@@ -300,7 +367,7 @@ impl StorageManager {
     pub async fn delete_file(&self, bucket: &str, key: &str) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
-        let _file = sqlx::query!(
+        let file = sqlx::query!(
             "SELECT file_path FROM files WHERE bucket = $1 AND key = $2",
             bucket,
             key
@@ -312,6 +379,18 @@ impl StorageManager {
             key: key.to_string(),
         })?;
 
+        // Deduplication (see store_file) can alias multiple (bucket, key) rows onto the same
+        // on-disk file_path. Only unlink the physical file once nothing else still points at it,
+        // otherwise deleting one aliased key would corrupt every other key sharing those bytes.
+        let other_references: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM files WHERE file_path = $1 AND NOT (bucket = $2 AND key = $3)"
+        )
+        .bind(&file.file_path)
+        .bind(bucket)
+        .bind(key)
+        .fetch_one(&mut *tx)
+        .await?;
+
         sqlx::query!(
             "DELETE FROM files WHERE bucket = $1 AND key = $2",
             bucket,
@@ -322,9 +401,12 @@ impl StorageManager {
 
         tx.commit().await?;
 
-        let file_path = self.get_file_path(bucket, key);
-        if let Err(e) = tokio::fs::remove_file(&file_path).await {
-            warn!("⚠️ Failed to delete file from disk (file may not exist): {}", e);
+        if other_references == 0 {
+            if let Err(e) = tokio::fs::remove_file(&file.file_path).await {
+                warn!("⚠️ Failed to delete file from disk (file may not exist): {}", e);
+            }
+        } else {
+            info!("🔗 Skipping physical delete for {}/{} - {} other key(s) still reference these bytes", bucket, key, other_references);
         }
 
         if let Err(e) = self.cache.invalidate_file(bucket, key).await {
@@ -390,11 +472,23 @@ impl StorageManager {
 
         let mut cleaned_files = 0;
         for file in files {
-            let file_path = self.get_file_path(bucket, &file.key);
-            if let Err(e) = tokio::fs::remove_file(&file_path).await {
-                warn!("⚠️ Failed to delete file from disk: {} - {}", file_path.display(), e);
+            // Same aliasing concern as delete_file(): the bucket's rows are already gone (CASCADE
+            // above), so any remaining row with this file_path is a dedup-aliased key elsewhere
+            // that's still using these bytes.
+            let other_references: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE file_path = $1")
+                .bind(&file.file_path)
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or(0);
+
+            if other_references == 0 {
+                if let Err(e) = tokio::fs::remove_file(&file.file_path).await {
+                    warn!("⚠️ Failed to delete file from disk: {} - {}", file.file_path, e);
+                } else {
+                    cleaned_files += 1;
+                }
             } else {
-                cleaned_files += 1;
+                info!("🔗 Skipping physical delete for {}/{} - {} other key(s) still reference these bytes", bucket, file.key, other_references);
             }
             if let Err(e) = self.cache.invalidate_file(bucket, &file.key).await {
                 warn!("⚠️ Failed to invalidate cache for {}/{}: {}", bucket, file.key, e);
