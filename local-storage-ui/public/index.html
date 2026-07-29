@@ -12,6 +12,34 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css?family=Roboto:300,400,500,700&display=swap"
     />
+    <!--
+      Auto-recovery for a transient resource-load failure (e.g. config.js or
+      the main bundle failing mid-load) - most commonly hit right after this
+      backend cold-starts from scale-to-zero, since the new pod's IP/route
+      briefly churns the host's network state and can make the browser abort
+      an in-flight request. A single delayed reload clears it silently
+      instead of leaving a permanently blank page; the retry flag prevents a
+      loop if something is genuinely broken rather than transient.
+    -->
+    <script>
+      (function () {
+        var RETRY_FLAG = "lsui_reload_retry";
+        window.addEventListener(
+          "error",
+          function (e) {
+            var target = e.target;
+            if (!target || (target.tagName !== "SCRIPT" && target.tagName !== "LINK")) return;
+            if (sessionStorage.getItem(RETRY_FLAG)) return;
+            sessionStorage.setItem(RETRY_FLAG, "1");
+            setTimeout(function () { location.reload(); }, 800);
+          },
+          true
+        );
+        window.addEventListener("load", function () {
+          sessionStorage.removeItem(RETRY_FLAG);
+        });
+      })();
+    </script>
     <!-- Runtime configuration - will be replaced at container startup -->
     <script src="%PUBLIC_URL%/config.js"></script>
     <title>Local Storage UI</title>
