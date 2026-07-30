@@ -16,8 +16,13 @@ pub struct DatabaseManager {
 }
 
 impl DatabaseManager {
-    pub async fn new(config: Arc<DatabaseConfig>) -> Result<Self> {
-        let pool = PgPool::connect(&config.url).await?;
+    /// Takes an already-connected pool rather than opening its own - this used to call
+    /// `PgPool::connect(&config.url)` here, a second fully independent connection to the exact
+    /// same database `StorageManager::new`'s caller already connected in main.rs. On a cold
+    /// start (this app + Postgres both waking from zero) that redundant connect/auth handshake
+    /// serialized in after CacheManager's own init, adding real, entirely avoidable latency to
+    /// every boot for no behavioral benefit - nothing here needs a second, separate connection.
+    pub async fn new(pool: PgPool, config: Arc<DatabaseConfig>) -> Result<Self> {
         Ok(Self { pool, config })
     }
 

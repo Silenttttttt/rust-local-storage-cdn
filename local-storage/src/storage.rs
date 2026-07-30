@@ -52,7 +52,7 @@ impl StorageManager {
         let cache = Arc::new(CacheManager::new(Arc::clone(&config), pool.clone()).await?);
         let crypto = Arc::new(CryptoManager::new(Arc::new(config.crypto.clone()))?);
         let compression = Arc::new(CompressionManager::new(Arc::new(config.compression.clone())));
-        let db = Arc::new(DatabaseManager::new(Arc::new(config.database.clone())).await?);
+        let db = Arc::new(DatabaseManager::new(pool.clone(), Arc::new(config.database.clone())).await?);
         let encryption_keys = Arc::new(EncryptionKeyManager::new(pool.clone(), Arc::clone(&config)));
 
         // Gated internally on cache_config.preload_enabled - benefits both cache backends.
