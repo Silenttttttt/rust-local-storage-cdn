@@ -243,7 +243,72 @@ pub async fn handle_file_request(
         info!("✅ File info retrieved - bucket: {}, key: {}, size: {} bytes", bucket, key, info.file_size);
         Ok(Json(info).into_response())
     } else {
-        // Handle file download request
+        let range_header = request_headers.get("range").and_then(|v| v.to_str().ok());
+
+        // A Range request tries the direct-seek fast path first (get_file_range_if_plain) -
+        // reads only the requested bytes straight from disk, skipping the full-file read
+        // entirely for the common case (a large plain video file being scrubbed/seeked).
+        // Needs the file's total size upfront to validate the range, which get_file_info
+        // provides without touching file content at all. Falls through to the existing
+        // full-decode path below whenever this doesn't apply: no Range header, the file is
+        // compressed/encrypted (get_file_range_if_plain returns None), or the info lookup
+        // itself fails for any reason.
+        if let Some(range_value) = range_header {
+            if let Ok(info) = storage.get_file_info(&bucket, &key).await {
+                let total_len = info.file_size as u64;
+                match parse_range_header(range_value, total_len) {
+                    Some((start, end)) => {
+                        if let Ok(Some((slice, content_type, total))) =
+                            storage.get_file_range_if_plain(&bucket, &key, start, end).await
+                        {
+                            let mut headers = HeaderMap::new();
+                            headers.insert(
+                                "Content-Type",
+                                HeaderValue::from_str(&content_type)
+                                    .map_err(|_| StorageError::BadRequest("Invalid content type".to_string()))?,
+                            );
+                            headers.insert("Accept-Ranges", HeaderValue::from_static("bytes"));
+                            headers.insert(
+                                "Content-Range",
+                                HeaderValue::from_str(&format!("bytes {}-{}/{}", start, end, total))
+                                    .map_err(|_| StorageError::BadRequest("Invalid range".to_string()))?,
+                            );
+                            info!(
+                                "✅ Partial file served (direct seek) - bucket: {}, key: {}, range: {}-{}/{}",
+                                bucket, key, start, end, total
+                            );
+                            return Ok((StatusCode::PARTIAL_CONTENT, headers, slice).into_response());
+                        }
+                        // Compressed/encrypted (or the fast path otherwise declined) -
+                        // fall through to the full-decode path below, which re-validates
+                        // and slices the range itself using the real decoded length.
+                    }
+                    None => {
+                        // A Range header that doesn't parse into a satisfiable single
+                        // range (unsatisfiable bounds, or a multi-range request) gets a
+                        // proper 416 only when it at least LOOKED like a bytes= range but
+                        // was out of bounds - anything else (unsupported syntax) falls
+                        // through to a full 200 response below.
+                        if let Some(spec) = range_value.strip_prefix("bytes=") {
+                            if !spec.contains(',') {
+                                let mut headers = HeaderMap::new();
+                                headers.insert("Accept-Ranges", HeaderValue::from_static("bytes"));
+                                headers.insert(
+                                    "Content-Range",
+                                    HeaderValue::from_str(&format!("bytes */{}", total_len))
+                                        .map_err(|_| StorageError::BadRequest("Invalid range".to_string()))?,
+                                );
+                                return Ok((StatusCode::RANGE_NOT_SATISFIABLE, headers).into_response());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Full file download (no Range header), or the fallback path for a range request
+        // the fast path above didn't handle (compressed/encrypted file, info-lookup
+        // failure, or an unsupported Range syntax that still needs a full 200 response).
         let (content, content_type) = storage.get_file(&bucket, &key).await?;
         let total_len = content.len() as u64;
 
@@ -253,39 +318,19 @@ pub async fn handle_file_request(
         }
         headers.insert("Accept-Ranges", HeaderValue::from_static("bytes"));
 
-        let range_header = request_headers.get("range").and_then(|v| v.to_str().ok());
         if let Some(range_value) = range_header {
-            match parse_range_header(range_value, total_len) {
-                Some((start, end)) => {
-                    let slice = content[start as usize..=end as usize].to_vec();
-                    headers.insert(
-                        "Content-Range",
-                        HeaderValue::from_str(&format!("bytes {}-{}/{}", start, end, total_len))
-                            .map_err(|_| StorageError::BadRequest("Invalid range".to_string()))?,
-                    );
-                    info!(
-                        "✅ Partial file served - bucket: {}, key: {}, range: {}-{}/{}",
-                        bucket, key, start, end, total_len
-                    );
-                    return Ok((StatusCode::PARTIAL_CONTENT, headers, slice).into_response());
-                }
-                None => {
-                    // A Range header that doesn't parse into a satisfiable single
-                    // range (unsatisfiable bounds, or a multi-range request) gets
-                    // a proper 416 only when it at least LOOKED like a bytes=
-                    // range but was out of bounds - anything else (unsupported
-                    // syntax) just falls through to a full 200 response below.
-                    if let Some(spec) = range_value.strip_prefix("bytes=") {
-                        if !spec.contains(',') {
-                            headers.insert(
-                                "Content-Range",
-                                HeaderValue::from_str(&format!("bytes */{}", total_len))
-                                    .map_err(|_| StorageError::BadRequest("Invalid range".to_string()))?,
-                            );
-                            return Ok((StatusCode::RANGE_NOT_SATISFIABLE, headers).into_response());
-                        }
-                    }
-                }
+            if let Some((start, end)) = parse_range_header(range_value, total_len) {
+                let slice = content[start as usize..=end as usize].to_vec();
+                headers.insert(
+                    "Content-Range",
+                    HeaderValue::from_str(&format!("bytes {}-{}/{}", start, end, total_len))
+                        .map_err(|_| StorageError::BadRequest("Invalid range".to_string()))?,
+                );
+                info!(
+                    "✅ Partial file served (full-decode fallback) - bucket: {}, key: {}, range: {}-{}/{}",
+                    bucket, key, start, end, total_len
+                );
+                return Ok((StatusCode::PARTIAL_CONTENT, headers, slice).into_response());
             }
         }
 

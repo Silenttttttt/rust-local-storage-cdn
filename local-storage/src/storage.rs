@@ -15,6 +15,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use std::path::PathBuf;
 use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use uuid::Uuid;
 use chrono;
 
@@ -339,6 +340,60 @@ impl StorageManager {
         }
 
         Ok((content, Some(file.content_type)))
+    }
+
+    /// For a Range request on a PLAIN (uncompressed, unencrypted) file, reads only the
+    /// requested byte span directly from disk via seek - skips the full-file read, the
+    /// content cache, and decode entirely, unlike `get_file()`. Returns `Ok(None)` when the
+    /// file is compressed or encrypted (decode needs the whole buffer to decrypt/validate)
+    /// so the caller falls back to `get_file()` + slicing the result, same as before this
+    /// existed. A real memory/latency win for the common case this targets - a large plain
+    /// video file, where a viewer seeking to one point shouldn't cost a full-file read.
+    pub async fn get_file_range_if_plain(
+        &self,
+        bucket: &str,
+        key: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<Option<(Vec<u8>, String, u64)>> {
+        let file = match self.cache.get_file_metadata(bucket, key).await {
+            Ok(Some(cached)) => cached,
+            _ => {
+                let file = self.db.get_file(bucket, key).await?;
+                if let Err(e) = self.cache.set_file_metadata(bucket, key, &file).await {
+                    warn!("⚠️ Failed to cache file metadata: {}", e);
+                }
+                file
+            }
+        };
+
+        if file.is_compressed.unwrap_or(false) || file.is_encrypted.unwrap_or(false) {
+            return Ok(None);
+        }
+
+        let total = file.file_size as u64;
+        let clamped_end = end.min(total.saturating_sub(1));
+        if total == 0 || start > clamped_end {
+            return Ok(None); // let the caller's own range validation produce the right error
+        }
+        let len = (clamped_end - start + 1) as usize;
+
+        let mut f = fs::File::open(&file.file_path)
+            .await
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        f.seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        let mut buf = vec![0u8; len];
+        f.read_exact(&mut buf)
+            .await
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+
+        if let Err(e) = self.db.update_access(&file.id).await {
+            warn!("⚠️ Failed to update access stats for {}/{}: {}", bucket, key, e);
+        }
+
+        Ok(Some((buf, file.content_type, total)))
     }
 
     /// Reverse whatever `store_file` did: decrypt (if encrypted), then decompress (if
