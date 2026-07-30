@@ -255,7 +255,13 @@ pub async fn handle_file_request(
         // itself fails for any reason.
         if let Some(range_value) = range_header {
             if let Ok(info) = storage.get_file_info(&bucket, &key).await {
-                let total_len = info.file_size as u64;
+                // original_size, not file_size: Range always refers to the DECODED
+                // representation the client receives, not the on-disk stored size -
+                // for a compressed file those two differ (file_size is the smaller,
+                // compressed size), so validating against file_size here would wrongly
+                // reject perfectly valid ranges (or accept invalid ones) whenever
+                // compression is in play.
+                let total_len = info.original_size as u64;
                 match parse_range_header(range_value, total_len) {
                     Some((start, end)) => {
                         if let Ok(Some((slice, content_type, total))) =
@@ -279,8 +285,29 @@ pub async fn handle_file_request(
                             );
                             return Ok((StatusCode::PARTIAL_CONTENT, headers, slice).into_response());
                         }
-                        // Compressed/encrypted (or the fast path otherwise declined) -
-                        // fall through to the full-decode path below, which re-validates
+                        if let Ok(Some((slice, content_type, total))) =
+                            storage.get_compressed_file_range(&bucket, &key, start, end).await
+                        {
+                            let mut headers = HeaderMap::new();
+                            headers.insert(
+                                "Content-Type",
+                                HeaderValue::from_str(&content_type)
+                                    .map_err(|_| StorageError::BadRequest("Invalid content type".to_string()))?,
+                            );
+                            headers.insert("Accept-Ranges", HeaderValue::from_static("bytes"));
+                            headers.insert(
+                                "Content-Range",
+                                HeaderValue::from_str(&format!("bytes {}-{}/{}", start, end, total))
+                                    .map_err(|_| StorageError::BadRequest("Invalid range".to_string()))?,
+                            );
+                            info!(
+                                "✅ Partial file served (streamed decompress) - bucket: {}, key: {}, range: {}-{}/{}",
+                                bucket, key, start, end, total
+                            );
+                            return Ok((StatusCode::PARTIAL_CONTENT, headers, slice).into_response());
+                        }
+                        // Encrypted (or either fast path otherwise declined) - fall
+                        // through to the full-decode path below, which re-validates
                         // and slices the range itself using the real decoded length.
                     }
                     None => {

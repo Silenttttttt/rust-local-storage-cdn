@@ -85,6 +85,60 @@ impl CompressionManager {
         }
     }
 
+    /// Decompresses only the requested byte range of the DECOMPRESSED output -
+    /// discards decoded bytes before `start` as they're produced (never held in
+    /// memory) and stops reading as soon as `len` bytes have been collected
+    /// (never decodes the remainder of the file past the requested range
+    /// either). Can't skip decoding the portion BEFORE `start` - these formats
+    /// aren't seekable, decompression is inherently sequential from the
+    /// beginning - but this avoids ever materializing the FULL decompressed
+    /// output in memory, which is the real win for a large file where only a
+    /// small slice is actually being served (e.g. a video player seeking to
+    /// one point). Returns `Ok(None)` for anything other than the two
+    /// recognized header-byte formats (1=gzip, 2=zstd) - the caller falls back
+    /// to the existing full `decompress()`, which already handles the rarer
+    /// legacy/headerless cases safely.
+    pub fn decompress_range(&self, compressed_data: &[u8], start: usize, len: usize) -> Result<Option<Vec<u8>>> {
+        if compressed_data.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let format = compressed_data[0];
+        let data = &compressed_data[1..];
+        let mut reader: Box<dyn Read> = match format {
+            1 => Box::new(GzDecoder::new(data)),
+            2 => match zstd::Decoder::new(data) {
+                Ok(d) => Box::new(d),
+                Err(_) => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+
+        let mut discard_buf = [0u8; 65536];
+        let mut remaining_to_skip = start;
+        while remaining_to_skip > 0 {
+            let chunk = remaining_to_skip.min(discard_buf.len());
+            let read = reader.read(&mut discard_buf[..chunk])
+                .map_err(|e| StorageError::Compression(format!("Decompression failed while skipping to range start: {}", e)))?;
+            if read == 0 {
+                break; // EOF before reaching `start` - caller's own range validation should prevent this
+            }
+            remaining_to_skip -= read;
+        }
+
+        let mut result = vec![0u8; len];
+        let mut filled = 0;
+        while filled < len {
+            let read = reader.read(&mut result[filled..])
+                .map_err(|e| StorageError::Compression(format!("Decompression failed while reading range: {}", e)))?;
+            if read == 0 {
+                break; // EOF before filling the full requested length
+            }
+            filled += read;
+        }
+        result.truncate(filled);
+        Ok(Some(result))
+    }
+
     fn compress_gzip(&self, data: &[u8]) -> Result<Vec<u8>> {
         let mut encoder = GzEncoder::new(Vec::new(), GzCompression::new(self.config.level as u32));
         encoder.write_all(data).map_err(|e| {
@@ -149,5 +203,68 @@ impl CompressionManager {
             return 0.0;
         }
         (original_size as f64 - compressed_size as f64) / original_size as f64
+    }
+}
+
+#[cfg(test)]
+mod decompress_range_tests {
+    use super::*;
+    use crate::config::CompressionConfig;
+
+    fn manager(algorithm: &str) -> CompressionManager {
+        CompressionManager::new(Arc::new(CompressionConfig {
+            enabled: true,
+            algorithm: algorithm.to_string(),
+            level: 3,
+            min_size: 0,
+        }))
+    }
+
+    fn sample_data(len: usize) -> Vec<u8> {
+        // Deterministic, non-trivial content (not all-zeros) so a real
+        // encode/decode round trip is actually being exercised.
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    fn assert_range_matches(algorithm: &str) {
+        let mgr = manager(algorithm);
+        let original = sample_data(500_000);
+        let compressed = mgr.compress(&original).unwrap();
+
+        // A middle slice - exercises both "discard prefix" and "stop before EOF".
+        let (start, len) = (123_456, 10_000);
+        let range = mgr.decompress_range(&compressed, start, len).unwrap().unwrap();
+        assert_eq!(range, original[start..start + len]);
+
+        // From the very start.
+        let range = mgr.decompress_range(&compressed, 0, 1_000).unwrap().unwrap();
+        assert_eq!(range, original[0..1_000]);
+
+        // Right up to (and including) the last byte.
+        let tail_start = original.len() - 1_000;
+        let range = mgr.decompress_range(&compressed, tail_start, 1_000).unwrap().unwrap();
+        assert_eq!(range, original[tail_start..]);
+    }
+
+    #[test]
+    fn zstd_range_matches_full_decompress() {
+        assert_range_matches("zstd");
+    }
+
+    #[test]
+    fn gzip_range_matches_full_decompress() {
+        assert_range_matches("gzip");
+    }
+
+    #[test]
+    fn unrecognized_format_returns_none() {
+        let mgr = manager("zstd");
+        assert_eq!(mgr.decompress_range(&[0xFF, 1, 2, 3], 0, 2).unwrap(), None);
+    }
+
+    #[test]
+    fn empty_input_returns_empty() {
+        let mgr = manager("zstd");
+        assert_eq!(mgr.decompress_range(&[], 0, 10).unwrap(), Some(Vec::new()));
     }
 } 

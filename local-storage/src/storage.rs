@@ -396,6 +396,73 @@ impl StorageManager {
         Ok(Some((buf, file.content_type, total)))
     }
 
+    /// For a Range request on a file that's compressed but NOT encrypted (the actual state
+    /// of most of this instance's real video clips - compression is applied automatically
+    /// above a size threshold), streams the decompression instead of reading the whole file
+    /// AND materializing the whole decompressed output in memory the way `get_file()` does.
+    /// Can't skip decoding the portion before `start` (gzip/zstd aren't seekable formats,
+    /// decompression is inherently sequential from the beginning), but never holds more than
+    /// the compressed input plus the requested output slice at once - the real memory win for
+    /// a large file where only a small span is actually being served.
+    ///
+    /// Returns `Ok(None)` - falling back to the existing `get_file()` + slice path, unchanged
+    /// behavior - when the file is encrypted (AEAD's auth tag covers the whole ciphertext, so
+    /// partial decryption isn't safe without changing the storage format entirely, out of
+    /// scope here), not compressed (the plain fast path already covers that), or the
+    /// decompressor doesn't recognize the format (a rarer legacy case the full path already
+    /// handles correctly).
+    pub async fn get_compressed_file_range(
+        &self,
+        bucket: &str,
+        key: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<Option<(Vec<u8>, String, u64)>> {
+        let file = match self.cache.get_file_metadata(bucket, key).await {
+            Ok(Some(cached)) => cached,
+            _ => {
+                let file = self.db.get_file(bucket, key).await?;
+                if let Err(e) = self.cache.set_file_metadata(bucket, key, &file).await {
+                    warn!("⚠️ Failed to cache file metadata: {}", e);
+                }
+                file
+            }
+        };
+
+        if file.is_encrypted.unwrap_or(false) || !file.is_compressed.unwrap_or(false) {
+            return Ok(None);
+        }
+
+        let total = file.original_size as u64; // Range refers to the DECOMPRESSED length
+        let clamped_end = end.min(total.saturating_sub(1));
+        if total == 0 || start > clamped_end {
+            return Ok(None);
+        }
+        let want_len = (clamped_end - start + 1) as usize;
+        let content_type = file.content_type.clone();
+        let file_path = file.file_path.clone();
+        let compression = Arc::clone(&self.compression);
+        let start_usize = start as usize;
+
+        let decoded = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>> {
+            let compressed = std::fs::read(&file_path)?;
+            compression.decompress_range(&compressed, start_usize, want_len)
+        })
+        .await
+        .map_err(|e| StorageError::Io(format!("decompress task panicked: {}", e)))??;
+
+        let buf = match decoded {
+            Some(buf) => buf,
+            None => return Ok(None),
+        };
+
+        if let Err(e) = self.db.update_access(&file.id).await {
+            warn!("⚠️ Failed to update access stats for {}/{}: {}", bucket, key, e);
+        }
+
+        Ok(Some((buf, content_type, total)))
+    }
+
     /// Reverse whatever `store_file` did: decrypt (if encrypted), then decompress (if
     /// compressed) - the exact inverse order of compress-then-encrypt on write.
     async fn decode_content(&self, file: &StoredFile, mut content: Vec<u8>) -> Result<Vec<u8>> {
