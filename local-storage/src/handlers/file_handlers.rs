@@ -183,13 +183,50 @@ pub async fn upload_file(
     }
 }
 
+/// Parses a single-range `Range: bytes=start-end` header (RFC 7233). Only the
+/// common single-range forms video players/browsers actually send for
+/// seeking are handled - `start-end`, the open-ended `start-`, and the
+/// suffix form `-N` (last N bytes). A multi-range request (`bytes=0-9,20-29`)
+/// or anything malformed returns `None`, which the caller treats as "serve
+/// the whole file" rather than erroring - a client that sent something we
+/// don't understand still gets a working (if non-partial) response.
+fn parse_range_header(value: &str, total_len: u64) -> Option<(u64, u64)> {
+    let spec = value.strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None; // multi-range: not supported, fall back to a full response
+    }
+    let (start_str, end_str) = spec.split_once('-')?;
+
+    if start_str.is_empty() {
+        // Suffix range: "-500" means the last 500 bytes.
+        let suffix_len: u64 = end_str.parse().ok()?;
+        if suffix_len == 0 || total_len == 0 {
+            return None;
+        }
+        let start = total_len.saturating_sub(suffix_len);
+        return Some((start, total_len - 1));
+    }
+
+    let start: u64 = start_str.parse().ok()?;
+    let end: u64 = if end_str.is_empty() {
+        total_len.saturating_sub(1) // open-ended: "500-" means from 500 to EOF
+    } else {
+        end_str.parse().ok()?
+    };
+    if start > end || start >= total_len {
+        return None;
+    }
+    Some((start, end.min(total_len.saturating_sub(1))))
+}
+
 #[axum::debug_handler]
 pub async fn handle_file_request(
     State(state): State<AppState>,
     Path((bucket, path)): Path<(String, String)>,
+    request_headers: HeaderMap,
 ) -> Result<Response> {
     let storage = state.storage.read().await;
-    
+
     // Check if this is an info request
     let is_info = path.ends_with("/info");
     let key = if is_info {
@@ -197,9 +234,9 @@ pub async fn handle_file_request(
     } else {
         path
     };
-    
+
     info!("📄 File request - bucket: {}, key: {}, is_info: {}", bucket, key, is_info);
-    
+
     if is_info {
         // Handle file info request
         let info = storage.get_file_info(&bucket, &key).await?;
@@ -208,10 +245,50 @@ pub async fn handle_file_request(
     } else {
         // Handle file download request
         let (content, content_type) = storage.get_file(&bucket, &key).await?;
+        let total_len = content.len() as u64;
+
         let mut headers = HeaderMap::new();
         if let Some(ct) = content_type {
             headers.insert("Content-Type", HeaderValue::from_str(&ct).map_err(|_| StorageError::BadRequest("Invalid content type".to_string()))?);
         }
+        headers.insert("Accept-Ranges", HeaderValue::from_static("bytes"));
+
+        let range_header = request_headers.get("range").and_then(|v| v.to_str().ok());
+        if let Some(range_value) = range_header {
+            match parse_range_header(range_value, total_len) {
+                Some((start, end)) => {
+                    let slice = content[start as usize..=end as usize].to_vec();
+                    headers.insert(
+                        "Content-Range",
+                        HeaderValue::from_str(&format!("bytes {}-{}/{}", start, end, total_len))
+                            .map_err(|_| StorageError::BadRequest("Invalid range".to_string()))?,
+                    );
+                    info!(
+                        "✅ Partial file served - bucket: {}, key: {}, range: {}-{}/{}",
+                        bucket, key, start, end, total_len
+                    );
+                    return Ok((StatusCode::PARTIAL_CONTENT, headers, slice).into_response());
+                }
+                None => {
+                    // A Range header that doesn't parse into a satisfiable single
+                    // range (unsatisfiable bounds, or a multi-range request) gets
+                    // a proper 416 only when it at least LOOKED like a bytes=
+                    // range but was out of bounds - anything else (unsupported
+                    // syntax) just falls through to a full 200 response below.
+                    if let Some(spec) = range_value.strip_prefix("bytes=") {
+                        if !spec.contains(',') {
+                            headers.insert(
+                                "Content-Range",
+                                HeaderValue::from_str(&format!("bytes */{}", total_len))
+                                    .map_err(|_| StorageError::BadRequest("Invalid range".to_string()))?,
+                            );
+                            return Ok((StatusCode::RANGE_NOT_SATISFIABLE, headers).into_response());
+                        }
+                    }
+                }
+            }
+        }
+
         info!("✅ File downloaded - bucket: {}, key: {}, size: {} bytes", bucket, key, content.len());
         Ok((headers, content).into_response())
     }
@@ -262,4 +339,60 @@ pub async fn search_files(
         query.limit,
     ).await?;
     Ok(Json(files))
+}
+
+#[cfg(test)]
+mod range_header_tests {
+    use super::parse_range_header;
+
+    #[test]
+    fn plain_start_end() {
+        assert_eq!(parse_range_header("bytes=0-99", 1000), Some((0, 99)));
+        assert_eq!(parse_range_header("bytes=500-999", 1000), Some((500, 999)));
+    }
+
+    #[test]
+    fn open_ended() {
+        assert_eq!(parse_range_header("bytes=900-", 1000), Some((900, 999)));
+    }
+
+    #[test]
+    fn suffix_range() {
+        assert_eq!(parse_range_header("bytes=-500", 1000), Some((500, 999)));
+        assert_eq!(parse_range_header("bytes=-2000", 1000), Some((0, 999))); // longer than the file: clamp to the whole thing
+    }
+
+    #[test]
+    fn end_beyond_total_is_clamped() {
+        assert_eq!(parse_range_header("bytes=0-9999", 1000), Some((0, 999)));
+    }
+
+    #[test]
+    fn unsatisfiable_start_returns_none() {
+        assert_eq!(parse_range_header("bytes=1000-1999", 1000), None);
+        assert_eq!(parse_range_header("bytes=2000-3000", 1000), None);
+    }
+
+    #[test]
+    fn inverted_range_returns_none() {
+        assert_eq!(parse_range_header("bytes=500-100", 1000), None);
+    }
+
+    #[test]
+    fn multi_range_unsupported() {
+        assert_eq!(parse_range_header("bytes=0-99,200-299", 1000), None);
+    }
+
+    #[test]
+    fn malformed_returns_none() {
+        assert_eq!(parse_range_header("not-a-range", 1000), None);
+        assert_eq!(parse_range_header("bytes=abc-def", 1000), None);
+        assert_eq!(parse_range_header("bytes=", 1000), None);
+    }
+
+    #[test]
+    fn zero_length_file() {
+        assert_eq!(parse_range_header("bytes=0-99", 0), None);
+        assert_eq!(parse_range_header("bytes=-10", 0), None);
+    }
 } 
