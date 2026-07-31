@@ -76,6 +76,17 @@ export const downloadFile = async (bucket: string, key: string): Promise<Blob> =
   return response.data;
 };
 
+/**
+ * Direct URL to a file's raw bytes - for opening in a new tab (video/image/
+ * PDF/text render inline; anything else falls back to the browser's own
+ * download behavior). Unlike `downloadFile`, this doesn't fetch anything
+ * itself - the browser makes the request when the tab opens, so the
+ * server's real Content-Type (not a blob: URL, which loses it) decides
+ * whether it renders or downloads.
+ */
+export const getFileUrl = (bucket: string, key: string): string =>
+  `${API_URL}/buckets/${bucket}/files/${encodeURIComponent(key)}`;
+
 export const deleteFile = async (bucket: string, key: string): Promise<void> => {
   await api.delete(`/buckets/${bucket}/files/${encodeURIComponent(key)}`);
 };

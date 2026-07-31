@@ -7,14 +7,14 @@ import {
 } from '@mui/material';
 import {
   Download, Delete, Search, Folder, InsertDriveFile, CloudUpload, MoreVert,
-  Info, Home, Refresh, NavigateNext, FolderOpen,
+  Info, Home, Refresh, NavigateNext, FolderOpen, OpenInNew,
   AudioFile, Image, VideoFile, Description, Archive, Code,
   KeyboardArrowUp, KeyboardArrowDown, Sort, DeleteForever, Tune, ExpandMore, ExpandLess,
 } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useParams } from 'react-router-dom';
 import { useDropzone } from 'react-dropzone';
-import { listFiles, uploadFile, downloadFile, deleteFile, getBucketStats, getFileInfo, listEncryptionKeys } from '../api/client';
+import { listFiles, uploadFile, downloadFile, deleteFile, getBucketStats, getFileInfo, listEncryptionKeys, getFileUrl } from '../api/client';
 import { formatBytes } from '../utils/format';
 import { buildFileTree, sortItems, breadcrumbs, FolderItem, FileEntry, SortBy, SortOrder } from '../utils/fileTree';
 import { StoredFile, UploadOptions, EncryptionKeyInfo } from '../types/api';
@@ -109,6 +109,10 @@ export default function BucketView() {
   const sortedFiles = useMemo(() => sortItems(filteredFiles, sortBy, sortOrder), [filteredFiles, sortBy, sortOrder]);
 
   const crumbs = useMemo(() => breadcrumbs(currentPath), [currentPath]);
+
+  const handleViewRaw = (file: StoredFile) => {
+    window.open(getFileUrl(file.bucket, file.key), '_blank', 'noopener,noreferrer');
+  };
 
   const handleDownload = async (file: StoredFile) => {
     try {
@@ -466,6 +470,10 @@ export default function BucketView() {
       </Fab>
 
       <Menu anchorEl={fileMenuAnchor} open={Boolean(fileMenuAnchor)} onClose={() => setFileMenuAnchor(null)}>
+        <MenuItem onClick={() => { menuFile && handleViewRaw(menuFile); setFileMenuAnchor(null); }}>
+          <ListItemIcon><OpenInNew /></ListItemIcon>
+          View Raw
+        </MenuItem>
         <MenuItem onClick={() => { menuFile && handleDownload(menuFile); setFileMenuAnchor(null); }}>
           <ListItemIcon><Download /></ListItemIcon>
           Download
