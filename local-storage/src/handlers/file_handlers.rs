@@ -16,6 +16,54 @@ use crate::{
 use tracing::{info, error};
 use chrono;
 
+/// Header carrying the shared secret gating reads, when configured - the
+/// exact same header the cube-activator's HTTP front door already requires
+/// for mutating methods on any `write_protected` app (see cube-activator/src/
+/// cube_activator/http_proxy.py's `X-Activator-Write-Token` check). Reused
+/// deliberately rather than a second header/secret - see
+/// `AppState::download_protection_token`'s doc comment for the full reasoning.
+///
+/// Real gap this closes (found live, 2026-08-08, verifying Phase 3's file-
+/// transfer "Done when" criterion for the chat-clone project): this app's own
+/// GET routes had no auth of any kind, at any layer, prior to this change -
+/// only writes were ever gated, and only externally, by the activator's edge
+/// proxy in front of this app's *NodePort*-exposed Service. That left every
+/// GET reachable two ways with zero auth: the activator-fronted NodePort
+/// itself (reachable from the whole LAN + the Tailscale-tunneled VPS, per
+/// this app's own app.yml comments) AND the separate in-cluster-only
+/// `local-storage-backend-service` ClusterIP the activator's edge proxy
+/// doesn't front at all. Confirmed live against the real cluster: a direct
+/// GET of a real chat-attachment's exact storage key, from a non-member with
+/// no chat-server session at all, succeeded over the raw NodePort and
+/// returned the exact stored bytes; `GET /buckets/:bucket/files` (no key
+/// needed at all) listed every stored file's key, size, and hashes outright.
+/// This check is the fix: local-storage now enforces its own read gate
+/// in-process, so it holds regardless of which network path a request comes
+/// in on.
+const DOWNLOAD_TOKEN_HEADER: &str = "x-activator-write-token";
+
+/// Returns `Err(StorageError::Forbidden)` when a download-protection token is
+/// configured (`AppState::download_protection_token`, from
+/// `WRITE_PROTECTION_TOKEN`) and the request didn't present it. A `None`
+/// state (the field's own default) is a deliberate, unconditional no-op -
+/// see that field's doc comment: this app also runs standalone with no
+/// activator/chat-server anywhere nearby, and must keep serving unauthenticated
+/// reads there exactly as it always has.
+fn require_download_token(state: &AppState, headers: &HeaderMap) -> Result<()> {
+    let Some(expected) = state.download_protection_token.as_ref() else {
+        return Ok(());
+    };
+    let provided = headers
+        .get(DOWNLOAD_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok());
+    if provided != Some(expected.as_str()) {
+        return Err(StorageError::Forbidden(
+            "valid X-Activator-Write-Token header required to read this bucket".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Optional per-upload overrides, e.g. `POST /buckets/x/files?encrypt=true&encryption_key_id=abc`.
 /// All fields are additive and default to the service's global config when omitted, so existing
 /// callers that don't set them keep behaving exactly as before.
@@ -225,6 +273,8 @@ pub async fn handle_file_request(
     Path((bucket, path)): Path<(String, String)>,
     request_headers: HeaderMap,
 ) -> Result<Response> {
+    require_download_token(&state, &request_headers)?;
+
     let storage = state.storage.read().await;
 
     // Check if this is an info request
@@ -388,7 +438,10 @@ pub async fn list_files(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     Query(query): Query<ListFilesQuery>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse> {
+    require_download_token(&state, &headers)?;
+
     let storage = state.storage.read().await;
     let files = storage.list_files(
         &bucket,
@@ -403,7 +456,10 @@ pub async fn list_files(
 pub async fn search_files(
     State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse> {
+    require_download_token(&state, &headers)?;
+
     let storage = state.storage.read().await;
     let files = storage.search_files(
         query.bucket.as_deref(),

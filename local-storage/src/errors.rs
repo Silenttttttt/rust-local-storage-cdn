@@ -34,6 +34,7 @@ pub enum StorageError {
     InvalidEncryptionAlgorithm(String),
     Cache(String),
     MissingEncryptionKey,
+    Forbidden(String),
 }
 
 impl From<std::io::Error> for StorageError {
@@ -107,6 +108,7 @@ impl fmt::Display for StorageError {
             Self::InvalidEncryptionAlgorithm(msg) => write!(f, "Invalid encryption algorithm: {}", msg),
             Self::Cache(msg) => write!(f, "Cache error: {}", msg),
             Self::MissingEncryptionKey => write!(f, "Missing encryption key"),
+            Self::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
         }
     }
 }
@@ -195,6 +197,10 @@ impl IntoResponse for StorageError {
             Self::MissingEncryptionKey => {
                 error!("🔑 Missing encryption key");
                 (StatusCode::INTERNAL_SERVER_ERROR, "Missing encryption key".to_string())
+            },
+            Self::Forbidden(msg) => {
+                warn!("🚫 Forbidden: {}", msg);
+                (StatusCode::FORBIDDEN, format!("Forbidden: {}", msg))
             },
         };
 

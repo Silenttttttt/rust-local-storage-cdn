@@ -71,6 +71,7 @@ impl TestConfig {
                 min_size: 1024,
             },
             s3: None,
+            download_protection_token: None,
         })
     }
 }

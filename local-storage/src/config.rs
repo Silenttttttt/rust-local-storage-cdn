@@ -12,6 +12,22 @@ pub struct Config {
     pub crypto: CryptoConfig,
     pub compression: CompressionConfig,
     pub s3: Option<S3Config>,
+    /// Shared secret required to read file content/listings, mirroring the SAME
+    /// `WRITE_PROTECTION_TOKEN` the cube-activator's HTTP front door already
+    /// requires (as `X-Activator-Write-Token`) for mutating methods on any
+    /// `write_protected` app - see cube-activator/src/cube_activator/
+    /// http_proxy.py. Reused here, on the read side, rather than a second
+    /// secret: chat-server already holds this exact value server-side
+    /// (`LOCAL_STORAGE_WRITE_TOKEN` in its own env, see apps/chat-server/
+    /// backend/src/local-storage/client.ts) and never sends it to a browser,
+    /// so it's already the right shape of secret for gating reads too.
+    ///
+    /// Optional/presence-gated, same convention as `s3` above: unset (the
+    /// default) leaves every GET exactly as unauthenticated as before this
+    /// field existed - this app is also run standalone (docker-compose,
+    /// local dev) with no activator or chat-server anywhere nearby, and must
+    /// keep working with zero config there.
+    pub download_protection_token: Option<String>,
 }
 
 /// The v2 S3-compatible API is opt-in: it's only mounted at /v2 if both S3_ACCESS_KEY and
@@ -175,6 +191,15 @@ impl Config {
                 }
                 _ => None,
             },
+            // Deliberately the SAME env var name the activator's own front door
+            // reads (WRITE_PROTECTION_TOKEN) - not a new, second secret. Empty
+            // string is treated the same as unset (matches how the activator's
+            // own `secrets_as_env_vars` wiring can hand an app an empty-string
+            // env var rather than omitting it outright when a k8s Secret key is
+            // present but blank).
+            download_protection_token: env::var("WRITE_PROTECTION_TOKEN")
+                .ok()
+                .filter(|v| !v.is_empty()),
         };
 
         Ok(config)

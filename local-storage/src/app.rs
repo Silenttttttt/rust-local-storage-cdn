@@ -53,6 +53,13 @@ pub struct AppState {
     /// Present only when S3_ACCESS_KEY/S3_SECRET_KEY are configured - gates whether the /v2
     /// S3-compatible router is mounted at all.
     pub s3_config: Option<Arc<crate::config::S3Config>>,
+    /// Present only when WRITE_PROTECTION_TOKEN is configured - see
+    /// `config::Config::download_protection_token`'s doc comment. Checked by
+    /// `handlers::file_handlers`'s read routes (file content/info, list,
+    /// search) against the `X-Activator-Write-Token` header; absent (the
+    /// default) leaves those routes exactly as open as before this field
+    /// existed.
+    pub download_protection_token: Option<Arc<String>>,
 }
 
 

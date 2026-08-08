@@ -62,10 +62,17 @@ async fn main() -> Result<()> {
     if s3_config.is_none() {
         info!("ℹ️ S3 v2 API disabled - set S3_ACCESS_KEY and S3_SECRET_KEY to enable it");
     }
+    let download_protection_token = config.download_protection_token.clone().map(Arc::new);
+    if download_protection_token.is_none() {
+        info!("ℹ️ Read/download protection disabled - set WRITE_PROTECTION_TOKEN to require X-Activator-Write-Token on GET routes too");
+    } else {
+        info!("🔒 Read/download protection enabled - GET file/list/search routes now require X-Activator-Write-Token");
+    }
     let state = AppState {
         storage,
         request_semaphore,
         s3_config,
+        download_protection_token,
     };
     info!("🔧 Application state created");
 
