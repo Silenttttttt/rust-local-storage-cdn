@@ -63,16 +63,20 @@ async fn main() -> Result<()> {
         info!("ℹ️ S3 v2 API disabled - set S3_ACCESS_KEY and S3_SECRET_KEY to enable it");
     }
     let download_protection_token = config.download_protection_token.clone().map(Arc::new);
+    let protected_read_buckets = config.protected_read_buckets.clone().map(Arc::new);
     if download_protection_token.is_none() {
         info!("ℹ️ Read/download protection disabled - set WRITE_PROTECTION_TOKEN to require X-Activator-Write-Token on GET routes too");
+    } else if let Some(buckets) = protected_read_buckets.as_ref() {
+        info!("🔒 Read/download protection enabled for buckets {:?} - X-Activator-Write-Token required for those, every other bucket stays open", buckets);
     } else {
-        info!("🔒 Read/download protection enabled - GET file/list/search routes now require X-Activator-Write-Token");
+        info!("🔒 Read/download protection enabled for ALL buckets - GET file/list/search routes now require X-Activator-Write-Token (set PROTECTED_READ_BUCKETS to narrow this to specific buckets instead)");
     }
     let state = AppState {
         storage,
         request_semaphore,
         s3_config,
         download_protection_token,
+        protected_read_buckets,
     };
     info!("🔧 Application state created");
 

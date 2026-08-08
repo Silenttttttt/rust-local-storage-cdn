@@ -60,6 +60,12 @@ pub struct AppState {
     /// default) leaves those routes exactly as open as before this field
     /// existed.
     pub download_protection_token: Option<Arc<String>>,
+    /// Present only when PROTECTED_READ_BUCKETS is configured - see
+    /// `config::Config::protected_read_buckets`'s doc comment. `None` with a
+    /// token configured means "protect every bucket" (the original,
+    /// blanket-protection behavior); `Some(list)` narrows enforcement to
+    /// only the named buckets.
+    pub protected_read_buckets: Option<Arc<Vec<String>>>,
 }
 
 

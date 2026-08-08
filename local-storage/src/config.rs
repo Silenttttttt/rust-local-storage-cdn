@@ -28,6 +28,25 @@ pub struct Config {
     /// local dev) with no activator or chat-server anywhere nearby, and must
     /// keep working with zero config there.
     pub download_protection_token: Option<String>,
+    /// Which buckets `download_protection_token` actually gates, when set.
+    ///
+    /// Added after `download_protection_token` itself: the very first
+    /// deployment of that field gated EVERY bucket unconditionally the
+    /// instant the token was configured, on a shared multi-tenant instance
+    /// of this service (many unrelated apps' buckets, not just the one that
+    /// needed protecting) - confirmed live as a real regression the moment
+    /// it shipped: buckets with nothing to do with the app that requested
+    /// this feature started 403ing for their own normal, previously-public
+    /// reads. This field narrows the gate to only the bucket(s) that
+    /// actually need it.
+    ///
+    /// `None` (unset) with a token configured falls back to the original
+    /// protect-everything behavior - a deliberate fail-CLOSED default for
+    /// any OTHER deployment of this exact version that already relies on
+    /// blanket protection and hasn't set this new var; every bucket this
+    /// instance actually serves must be enumerated explicitly to get
+    /// selective protection instead.
+    pub protected_read_buckets: Option<Vec<String>>,
 }
 
 /// The v2 S3-compatible API is opt-in: it's only mounted at /v2 if both S3_ACCESS_KEY and
@@ -200,6 +219,21 @@ impl Config {
             download_protection_token: env::var("WRITE_PROTECTION_TOKEN")
                 .ok()
                 .filter(|v| !v.is_empty()),
+            // Comma-separated bucket names, e.g. "chat-attachments,chat-attachments-live-verify".
+            // Whitespace around each name is trimmed (operator-friendly for a
+            // hand-edited env value); empty entries (from a trailing comma or
+            // an all-whitespace value) are dropped. Unset or empty overall
+            // parses to `None` - see this field's own doc comment in
+            // `Config` for exactly what that falls back to.
+            protected_read_buckets: env::var("PROTECTED_READ_BUCKETS")
+                .ok()
+                .map(|raw| {
+                    raw.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<String>>()
+                })
+                .filter(|list| !list.is_empty()),
         };
 
         Ok(config)

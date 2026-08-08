@@ -72,6 +72,7 @@ impl TestConfig {
             },
             s3: None,
             download_protection_token: None,
+            protected_read_buckets: None,
         })
     }
 }

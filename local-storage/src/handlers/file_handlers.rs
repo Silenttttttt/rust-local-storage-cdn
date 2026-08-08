@@ -44,24 +44,67 @@ const DOWNLOAD_TOKEN_HEADER: &str = "x-activator-write-token";
 
 /// Returns `Err(StorageError::Forbidden)` when a download-protection token is
 /// configured (`AppState::download_protection_token`, from
-/// `WRITE_PROTECTION_TOKEN`) and the request didn't present it. A `None`
-/// state (the field's own default) is a deliberate, unconditional no-op -
-/// see that field's doc comment: this app also runs standalone with no
-/// activator/chat-server anywhere nearby, and must keep serving unauthenticated
-/// reads there exactly as it always has.
-fn require_download_token(state: &AppState, headers: &HeaderMap) -> Result<()> {
-    let Some(expected) = state.download_protection_token.as_ref() else {
-        return Ok(());
-    };
+/// `WRITE_PROTECTION_TOKEN`) AND this request is actually in scope for it,
+/// and the request didn't present the token. A `None` `download_protection_token`
+/// (the field's own default) is a deliberate, unconditional no-op - see that
+/// field's doc comment: this app also runs standalone with no activator/
+/// chat-server anywhere nearby, and must keep serving unauthenticated reads
+/// there exactly as it always has.
+///
+/// `bucket` is `None` for an unscoped request (`search_files` with no
+/// `bucket` query param, which can return results from ANY bucket) and
+/// `Some(name)` for every other read (`handle_file_request`/`list_files`,
+/// both always scoped to one named bucket via their own path param). Scoping
+/// rule, per `AppState::protected_read_buckets`'s own doc comment: if a
+/// bucket allowlist is configured, only requests naming a bucket in it (or
+/// an UNSCOPED request, which could span a protected bucket's contents and
+/// must fail closed rather than silently leak them) require the token -
+/// every other named bucket is exactly as open as before this whole feature
+/// existed. No allowlist configured at all means "protect everything",
+/// unchanged from this check's original, first-shipped behavior.
+fn require_download_token(state: &AppState, headers: &HeaderMap, bucket: Option<&str>) -> Result<()> {
     let provided = headers
         .get(DOWNLOAD_TOKEN_HEADER)
         .and_then(|v| v.to_str().ok());
-    if provided != Some(expected.as_str()) {
-        return Err(StorageError::Forbidden(
+    let allowlist = state.protected_read_buckets.as_deref().map(|v| v.as_slice());
+    if download_is_authorized(
+        state.download_protection_token.as_deref().map(|s| s.as_str()),
+        allowlist,
+        bucket,
+        provided,
+    ) {
+        Ok(())
+    } else {
+        Err(StorageError::Forbidden(
             "valid X-Activator-Write-Token header required to read this bucket".to_string(),
-        ));
+        ))
     }
-    Ok(())
+}
+
+/// Pure decision function behind `require_download_token`, pulled out
+/// specifically so the bucket-scoping logic can be unit-tested without
+/// constructing a real `AppState` (which needs a live storage backend) -
+/// this is the actual security-relevant logic, everything in
+/// `require_download_token` above is just wiring it to axum's types.
+fn download_is_authorized(
+    expected_token: Option<&str>,
+    protected_buckets: Option<&[String]>,
+    requested_bucket: Option<&str>,
+    provided_token: Option<&str>,
+) -> bool {
+    let Some(expected) = expected_token else {
+        return true; // no token configured at all - protection is off
+    };
+    if let Some(allowlist) = protected_buckets {
+        let in_scope = match requested_bucket {
+            Some(name) => allowlist.iter().any(|b| b == name),
+            None => true, // unscoped (e.g. a cross-bucket search) - fail closed
+        };
+        if !in_scope {
+            return true; // token configured, but this bucket isn't gated
+        }
+    }
+    provided_token == Some(expected)
 }
 
 /// Optional per-upload overrides, e.g. `POST /buckets/x/files?encrypt=true&encryption_key_id=abc`.
@@ -273,7 +316,7 @@ pub async fn handle_file_request(
     Path((bucket, path)): Path<(String, String)>,
     request_headers: HeaderMap,
 ) -> Result<Response> {
-    require_download_token(&state, &request_headers)?;
+    require_download_token(&state, &request_headers, Some(&bucket))?;
 
     let storage = state.storage.read().await;
 
@@ -440,7 +483,7 @@ pub async fn list_files(
     Query(query): Query<ListFilesQuery>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse> {
-    require_download_token(&state, &headers)?;
+    require_download_token(&state, &headers, Some(&bucket))?;
 
     let storage = state.storage.read().await;
     let files = storage.list_files(
@@ -458,7 +501,7 @@ pub async fn search_files(
     Query(query): Query<SearchQuery>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse> {
-    require_download_token(&state, &headers)?;
+    require_download_token(&state, &headers, query.bucket.as_deref())?;
 
     let storage = state.storage.read().await;
     let files = storage.search_files(
@@ -467,6 +510,55 @@ pub async fn search_files(
         query.limit,
     ).await?;
     Ok(Json(files))
+}
+
+#[cfg(test)]
+mod download_protection_tests {
+    use super::download_is_authorized;
+
+    #[test]
+    fn no_token_configured_is_always_authorized() {
+        assert!(download_is_authorized(None, None, Some("chat-attachments"), None));
+        assert!(download_is_authorized(None, Some(&["chat-attachments".to_string()]), Some("chat-attachments"), None));
+    }
+
+    #[test]
+    fn token_configured_no_allowlist_protects_every_bucket() {
+        // Original, first-shipped behavior: no PROTECTED_READ_BUCKETS at all
+        // means "protect everything" - this is the exact scenario that
+        // caused the real live regression (every unrelated app's bucket
+        // 403ing) this allowlist feature exists to fix; must stay
+        // deliberately fail-closed for anyone else already relying on it.
+        assert!(!download_is_authorized(Some("secret"), None, Some("clips"), None));
+        assert!(!download_is_authorized(Some("secret"), None, Some("clips"), Some("wrong")));
+        assert!(download_is_authorized(Some("secret"), None, Some("clips"), Some("secret")));
+    }
+
+    #[test]
+    fn allowlist_only_gates_named_buckets() {
+        let allowlist = vec!["chat-attachments".to_string(), "chat-attachments-live-verify".to_string()];
+        // The real regression this fix closes: an unrelated bucket must stay
+        // exactly as open as before, token or no token.
+        assert!(download_is_authorized(Some("secret"), Some(&allowlist), Some("clips"), None));
+        assert!(download_is_authorized(Some("secret"), Some(&allowlist), Some("video-editor"), Some("wrong-or-missing-doesnt-matter")));
+        // A gated bucket still requires the real token.
+        assert!(!download_is_authorized(Some("secret"), Some(&allowlist), Some("chat-attachments"), None));
+        assert!(!download_is_authorized(Some("secret"), Some(&allowlist), Some("chat-attachments"), Some("wrong")));
+        assert!(download_is_authorized(Some("secret"), Some(&allowlist), Some("chat-attachments"), Some("secret")));
+        assert!(download_is_authorized(Some("secret"), Some(&allowlist), Some("chat-attachments-live-verify"), Some("secret")));
+    }
+
+    #[test]
+    fn unscoped_request_with_allowlist_fails_closed() {
+        // search_files with no bucket param can return results from ANY
+        // bucket, including a protected one - must require the token even
+        // though no specific bucket name was given, or a cross-bucket search
+        // becomes a way to read protected content without ever naming it.
+        let allowlist = vec!["chat-attachments".to_string()];
+        assert!(!download_is_authorized(Some("secret"), Some(&allowlist), None, None));
+        assert!(!download_is_authorized(Some("secret"), Some(&allowlist), None, Some("wrong")));
+        assert!(download_is_authorized(Some("secret"), Some(&allowlist), None, Some("secret")));
+    }
 }
 
 #[cfg(test)]
