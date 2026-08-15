@@ -26,6 +26,19 @@ impl DatabaseManager {
         Ok(Self { pool, config })
     }
 
+    /// Real S3 semantics: PutObject to an existing key OVERWRITES it - it never errors with
+    /// "already exists". This used to be a plain INSERT with no ON CONFLICT clause, so any
+    /// second write to the same (bucket, key) with genuinely different content unconditionally
+    /// hit the `unique_bucket_key` constraint and errored - and worse, since the physical file
+    /// at `file_path` is already overwritten on disk (deterministic per (bucket, key), not
+    /// content-addressed) by the time this runs, the caller's error-path cleanup deleted that
+    /// freshly-overwritten file outright, leaving the OLD row pointing at nothing. Confirmed
+    /// live this had never actually destroyed real stored data (all 42 currently-stored files'
+    /// `file_path`s verified present on disk), but it was a real, reachable landmine - a caller
+    /// simply re-uploading to an existing key (exactly what fb-ad-capture-consumer's own re-sync
+    /// path does) would trigger it. `id` is deliberately excluded from the UPDATE SET - the
+    /// existing row's primary key persists across an overwrite, matching how a real S3 object's
+    /// identity survives a PUT rather than becoming a "new" object.
     pub async fn save_file(&self, file: &StoredFile) -> Result<()> {
         sqlx::query!(
             r#"
@@ -39,6 +52,27 @@ impl DatabaseManager {
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
                 $17, $18, $19, $20, $21, $22, $23
             )
+            ON CONFLICT (bucket, key) DO UPDATE SET
+                filename = EXCLUDED.filename,
+                file_path = EXCLUDED.file_path,
+                file_size = EXCLUDED.file_size,
+                original_size = EXCLUDED.original_size,
+                content_type = EXCLUDED.content_type,
+                hash_blake3 = EXCLUDED.hash_blake3,
+                hash_md5 = EXCLUDED.hash_md5,
+                metadata = EXCLUDED.metadata,
+                is_compressed = EXCLUDED.is_compressed,
+                is_encrypted = EXCLUDED.is_encrypted,
+                compression_algorithm = EXCLUDED.compression_algorithm,
+                encryption_algorithm = EXCLUDED.encryption_algorithm,
+                compression_ratio = EXCLUDED.compression_ratio,
+                upload_time = EXCLUDED.upload_time,
+                last_accessed = EXCLUDED.last_accessed,
+                access_count = EXCLUDED.access_count,
+                encryption_key_id = EXCLUDED.encryption_key_id,
+                compression_enabled = EXCLUDED.compression_enabled,
+                encryption_enabled = EXCLUDED.encryption_enabled,
+                compression_level = EXCLUDED.compression_level
             "#,
             file.id,
             file.bucket,
@@ -76,7 +110,7 @@ impl DatabaseManager {
                     };
                 }
             }
-            
+
             StorageError::Database(e.to_string())
         })?;
 
