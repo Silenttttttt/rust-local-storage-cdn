@@ -16,6 +16,12 @@ use crate::app::AppState;
 /// app::create_router).
 pub fn router() -> Router<AppState> {
     Router::new()
+        // boto3/aws-cli's ListBuckets sends a bare `GET /v2` (no trailing
+        // slash) against a bucket-less endpoint - axum doesn't auto-redirect
+        // a trailing-slash mismatch, so both forms need their own route to
+        // the same handler (confirmed live: a real boto3 client 404'd
+        // against `/v2/` alone).
+        .route("/v2", get(handlers::list_buckets))
         .route("/v2/", get(handlers::list_buckets))
         .route("/v2/:bucket", put(handlers::create_bucket))
         .route("/v2/:bucket", delete(handlers::delete_bucket))
