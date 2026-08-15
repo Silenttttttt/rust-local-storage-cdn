@@ -47,10 +47,10 @@ impl DatabaseManager {
                 hash_blake3, hash_md5, metadata, is_compressed, is_encrypted,
                 compression_algorithm, encryption_algorithm, compression_ratio,
                 upload_time, last_accessed, access_count, encryption_key_id,
-                compression_enabled, encryption_enabled, compression_level
+                compression_enabled, encryption_enabled, compression_level, expires_at
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                $17, $18, $19, $20, $21, $22, $23
+                $17, $18, $19, $20, $21, $22, $23, $24
             )
             ON CONFLICT (bucket, key) DO UPDATE SET
                 filename = EXCLUDED.filename,
@@ -72,7 +72,8 @@ impl DatabaseManager {
                 encryption_key_id = EXCLUDED.encryption_key_id,
                 compression_enabled = EXCLUDED.compression_enabled,
                 encryption_enabled = EXCLUDED.encryption_enabled,
-                compression_level = EXCLUDED.compression_level
+                compression_level = EXCLUDED.compression_level,
+                expires_at = EXCLUDED.expires_at
             "#,
             file.id,
             file.bucket,
@@ -96,7 +97,8 @@ impl DatabaseManager {
             file.encryption_key_id,
             file.compression_enabled,
             file.encryption_enabled,
-            file.compression_level
+            file.compression_level,
+            file.expires_at
         )
         .execute(&self.pool)
         .await.map_err(|e| {
@@ -129,6 +131,19 @@ impl DatabaseManager {
         .ok_or_else(|| StorageError::NotFound { bucket: bucket.to_string(), key: key.to_string() })?;
 
         Ok(file)
+    }
+
+    /// (bucket, key) pairs whose TTL has passed. Deliberately narrow WHERE
+    /// clause - a file with no TTL set (expires_at IS NULL, the default and
+    /// only behavior before this feature existed) can never match this,
+    /// full stop.
+    pub async fn list_expired_files(&self) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query!(
+            "SELECT bucket, key FROM files WHERE expires_at IS NOT NULL AND expires_at < NOW()"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| (r.bucket, r.key)).collect())
     }
 
     pub async fn get_file_by_hash(&self, hash_blake3: &str) -> Result<Option<StoredFile>> {

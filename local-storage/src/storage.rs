@@ -26,6 +26,12 @@ use chrono;
 pub struct StoreOptions {
     pub compress: Option<bool>,
     pub encrypt: Option<bool>,
+    /// Optional TTL, as an already-resolved absolute timestamp (not a
+    /// duration) - callers compute `Utc::now() + requested_ttl` themselves,
+    /// so this struct never needs its own notion of "now". `None` means
+    /// "never expires" - the default, and the only behavior any upload had
+    /// before this field existed.
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub compression_algorithm: Option<String>,
     pub compression_level: Option<i32>,
     pub encryption_key_id: Option<String>,
@@ -157,6 +163,7 @@ impl StorageManager {
                     last_cache_update: None,
                     cache_hits: Some(0),
                     cache_priority: Some(0),
+                    expires_at: opts.expires_at,
                 };
                 self.db.save_file(&aliased).await?;
                 return Ok(aliased);
@@ -249,6 +256,7 @@ impl StorageManager {
             last_cache_update: None,
             cache_hits: Some(0),
             cache_priority: Some(0),
+            expires_at: opts.expires_at,
         };
 
         self.db.save_file(&file).await.map_err(|e| {
@@ -303,6 +311,22 @@ impl StorageManager {
                 file
             }
         };
+
+        // Lazy TTL expiry: a file past its expires_at is treated as already
+        // gone, even if the periodic sweep hasn't reaped it yet - matches
+        // real S3 lifecycle-expiry semantics (the object stops being
+        // servable the moment it expires, not whenever some background job
+        // happens to run next). Self-heals by actually deleting it here,
+        // via the same reference-counted delete_file used everywhere else.
+        if let Some(expires_at) = file.expires_at {
+            if expires_at <= chrono::Utc::now() {
+                let _ = self.delete_file(bucket, key).await;
+                return Err(StorageError::NotFound {
+                    bucket: bucket.to_string(),
+                    key: key.to_string(),
+                });
+            }
+        }
 
         let raw_content = match self.cache.get_file_content(bucket, key).await {
             Ok(Some(cached)) => cached,
@@ -546,7 +570,44 @@ impl StorageManager {
 
     pub async fn get_file_info(&self, bucket: &str, key: &str) -> Result<FileInfo> {
         let file = self.db.get_file(bucket, key).await?;
+        // Same lazy-expiry self-heal as get_file - see that method's comment.
+        if let Some(expires_at) = file.expires_at {
+            if expires_at <= chrono::Utc::now() {
+                let _ = self.delete_file(bucket, key).await;
+                return Err(StorageError::NotFound {
+                    bucket: bucket.to_string(),
+                    key: key.to_string(),
+                });
+            }
+        }
         Ok(FileInfo::from(file))
+    }
+
+    /// Permanently deletes every currently-expired file (expires_at set AND
+    /// in the past). Called on a periodic interval from main.rs. Reuses
+    /// delete_file's existing reference-counted physical-delete logic per
+    /// key - never touches a file still referenced by another (bucket, key)
+    /// row (deduplication can alias multiple keys onto the same bytes).
+    /// Returns the number of rows actually removed. The WHERE clause this
+    /// relies on (in database.rs's `list_expired_files`) is deliberately
+    /// narrow: `expires_at IS NOT NULL AND expires_at < NOW()` - a file that
+    /// never opted into a TTL can never match it, regardless of anything
+    /// else about that file.
+    pub async fn sweep_expired_files(&self) -> Result<usize> {
+        let expired = self.db.list_expired_files().await?;
+        let mut removed = 0usize;
+        for (bucket, key) in expired {
+            match self.delete_file(&bucket, &key).await {
+                Ok(()) => {
+                    removed += 1;
+                    info!("⏰ TTL sweep removed expired file: {}/{}", bucket, key);
+                }
+                Err(e) => {
+                    warn!("⚠️ TTL sweep failed to remove {}/{}: {}", bucket, key, e);
+                }
+            }
+        }
+        Ok(removed)
     }
 
     pub async fn get_storage_stats(&self) -> Result<StorageStats> {

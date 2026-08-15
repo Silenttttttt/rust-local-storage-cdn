@@ -137,6 +137,11 @@
         "ordinal": 26,
         "name": "cache_priority",
         "type_info": "Int4"
+      },
+      {
+        "ordinal": 27,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
       }
     ],
     "parameters": {
@@ -170,6 +175,7 @@
       false,
       true,
       false,
+      true,
       true,
       true,
       true,

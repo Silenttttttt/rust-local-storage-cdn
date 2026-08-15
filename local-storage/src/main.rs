@@ -53,6 +53,8 @@ async fn main() -> Result<()> {
     let storage = Arc::new(RwLock::new(StorageManager::new(config.clone(), pool).await?));
     info!("💾 Storage manager initialized");
 
+    tokio::spawn(run_ttl_sweep(storage.clone()));
+
     // Create concurrency semaphore to prevent overwhelming
     let request_semaphore = Arc::new(Semaphore::new(100)); // Max 100 concurrent requests
     info!("🚦 Concurrency limiter initialized (max: 100 concurrent requests)");
@@ -156,6 +158,27 @@ async fn run_background_db_init(pool: sqlx::PgPool, config: Config) {
                     storage_path.display()
                 );
             }
+        }
+    }
+}
+
+/// Periodic sweep for the optional per-file TTL feature (2026-08-15) - the
+/// vast majority of files never set a TTL at all (expires_at IS NULL) and
+/// are completely untouched by this; only ever removes rows whose
+/// expires_at is both set AND already in the past (see
+/// DatabaseManager::list_expired_files' own narrow WHERE clause). A short
+/// interval (60s) keeps the lazy per-GET expiry check in storage.rs as the
+/// primary enforcement for anyone actively reading a just-expired key, and
+/// this sweep as the cleanup for keys nobody's requested since expiring.
+async fn run_ttl_sweep(storage: Arc<RwLock<StorageManager>>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        let storage = storage.read().await;
+        match storage.sweep_expired_files().await {
+            Ok(0) => {}
+            Ok(n) => info!("⏰ TTL sweep removed {n} expired file(s)"),
+            Err(e) => warn!("⚠️ TTL sweep failed: {}", e),
         }
     }
 }

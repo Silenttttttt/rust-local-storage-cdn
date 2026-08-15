@@ -198,8 +198,30 @@ pub async fn put_object(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    // Custom header, not a standard S3 one - real S3's own object expiration
+    // is a bucket-wide Lifecycle policy, a much bigger feature than a
+    // per-PutObject TTL. Same semantics as the custom REST API's own
+    // `ttl_seconds` query param: omit entirely for a permanent object (the
+    // default, and the only behavior before this existed).
+    let expires_at = match headers.get("x-ttl-seconds").and_then(|v| v.to_str().ok()) {
+        None => None,
+        Some(raw) => {
+            let ttl: i64 = raw
+                .parse()
+                .map_err(|_| S3Error::invalid_request("X-Ttl-Seconds must be a positive integer"))?;
+            if ttl <= 0 {
+                return Err(S3Error::invalid_request("X-Ttl-Seconds must be a positive integer"));
+            }
+            Some(chrono::Utc::now() + chrono::Duration::seconds(ttl))
+        }
+    };
+
+    let opts = StoreOptions {
+        expires_at,
+        ..StoreOptions::default()
+    };
     let file = storage
-        .store_file(&bucket, &key, body.to_vec(), content_type, StoreOptions::default())
+        .store_file(&bucket, &key, body.to_vec(), content_type, opts)
         .await
         .map_err(S3Error::from)?;
 

@@ -32,6 +32,10 @@ pub struct StoredFile {
     pub last_cache_update: Option<DateTime<Utc>>,
     pub cache_hits: Option<i64>,
     pub cache_priority: Option<i32>,
+    /// Optional TTL (2026-08-15) - None means "never expires", the only
+    /// behavior any file had before this field existed and the default for
+    /// every upload that doesn't explicitly opt in.
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -111,6 +115,7 @@ pub struct UploadResponse {
     pub compression_enabled: bool,
     pub encryption_enabled: bool,
     pub encryption_key_id: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -136,6 +141,7 @@ pub struct FileInfo {
     pub compression_enabled: bool,
     pub encryption_enabled: bool,
     pub encryption_key_id: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -246,6 +252,7 @@ impl From<StoredFile> for FileInfo {
             compression_enabled: file.compression_enabled.unwrap_or(false),
             encryption_enabled: file.encryption_enabled.unwrap_or(false),
             encryption_key_id: file.encryption_key_id,
+            expires_at: file.expires_at,
         }
     }
 }
@@ -267,6 +274,7 @@ impl From<StoredFile> for UploadResponse {
             compression_enabled: file.compression_enabled.unwrap_or(false),
             encryption_enabled: file.encryption_enabled.unwrap_or(false),
             encryption_key_id: file.encryption_key_id,
+            expires_at: file.expires_at,
         }
     }
 } 

@@ -117,6 +117,12 @@ pub struct UploadQuery {
     pub compression_algorithm: Option<String>,
     pub compression_level: Option<i32>,
     pub encryption_key_id: Option<String>,
+    /// Optional TTL in seconds - the uploaded file is automatically deleted
+    /// once it expires (a periodic sweep, plus a lazy check on the next
+    /// read if the sweep hasn't gotten to it yet). Omit entirely for a
+    /// permanent file - the only behavior any upload had before this field
+    /// existed, and still the default.
+    pub ttl_seconds: Option<i64>,
 }
 
 fn extract_filename_from_content_disposition(headers: &HeaderMap) -> Option<String> {
@@ -251,9 +257,20 @@ pub async fn upload_file(
         return Err(StorageError::BadRequest("No file content provided".into()));
     }
 
+    let expires_at = match query.ttl_seconds {
+        None => None,
+        Some(ttl) if ttl > 0 => Some(chrono::Utc::now() + chrono::Duration::seconds(ttl)),
+        Some(ttl) => {
+            return Err(StorageError::BadRequest(format!(
+                "ttl_seconds must be a positive number, got {ttl}"
+            )));
+        }
+    };
+
     let opts = StoreOptions {
         compress: query.compress,
         encrypt: query.encrypt,
+        expires_at,
         compression_algorithm: query.compression_algorithm,
         compression_level: query.compression_level,
         encryption_key_id: query.encryption_key_id,
